@@ -1,0 +1,34 @@
+trigger:
+  keywords:
+    - 小助手
+  directMessages: true
+model:
+  provider: openai
+  baseUrl: https://api.deepseek.com
+  name: deepseek-flash
+  timeoutMs: 120000
+  vision: true
+  contextTokens: 65536
+memory:
+  recentMessages: 60
+  summarizeAfter: 80
+tools:
+  search: true
+  searchUrl: http://searxng:8080
+  media: true
+  python: true
+  pythonRunnerUrl: http://python-runner:8766
+  voice: false
+  voiceName: zh-CN-XiaoxiaoNeural
+sandbox:
+  permissions:
+    network: true
+    process: true
+    workspaceRead: true
+    workspaceWrite: true
+delivery:
+  chunkCharacters: 1500
+  proactive: true
+tasks:
+  concurrency: 2
+  timeoutMs: 1800000

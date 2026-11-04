@@ -1,14 +1,114 @@
-node_modules/
-.idea/
-.vscode/
-dist/
-data/
-workspace/
-.env
-.env.*
-!.env.example
-coverage/
+# Logs
+logs
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+pnpm-lock.yaml
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.superpowers
+.codebuddy/
+.claude/
+bun.lock
+.codegraph
+# —— Node ——
+node_modules/
+.next/
+dist/
+.cache/
+package-lock.json
+
+# —— Python ——
+__pycache__/
+*.pyc
+*.pyo
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+build/
+.eggs/
+
+# —— venv ——
+.venv/
+venv/
+env/
+starbo/Lib/
+
+# —— Deep Agent ——
+.deepagent_fs/
+agent_files/
+agent_workspace/
+.langgraph_api/
+
+# —— Ruff ——
+.ruff_cache/
+
+# —— Env ——
+.env.local
+.env.*.local
+
+# —— IDE ——
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# —— OS ——
+.DS_Store
+Thumbs.db
+nul
+
+# —— Logs ——
+logs/
+*.log
+.superpowers
+.worktrees/
+
+# —— 自选股监测推送运行态与真实配置 ——
+config.yaml
+state/
+/workspace
+# —— 构建缓存与 UI 审查中间产物 ——
+.next/
+*.tsbuildinfo
+/.audit-images/
+/docs/ui-audit/.captures/
+/docs/ui-audit/tmp/
+/docs/ui-audit/*-verification.json
+/docs/ui-audit/assets/proposed/debug-*
+/docs/ui-audit/assets/proposed/*-look-*.png
+/docs/ui-audit/assets/proposed/*.gif
+/docs/ui-audit/assets/proposed/*.mp4
+# 保留当前原型直接引用的实录；不要屏蔽原图、字体、参考图与方案截图。
+!/docs/ui-audit/assets/proposed/classic-mist-motion.mp4
+
+# QQ bot private runtime data
+/data/
+/workspace/
+/.env
+/.env.*
+!/.env.example
 *.sqlite
 *.sqlite-*
 *.db
@@ -19,5 +119,3 @@ coverage/
 *.p12
 *.pfx
 qq-credentials.json*
-__pycache__/
-*.pyc

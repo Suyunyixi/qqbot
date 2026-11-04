@@ -15,7 +15,7 @@ import { registeredPlugins } from './plugins.js';
 import { permitted, toolPermissions } from './sandbox.js';
 import { workspaceFor, resolveWorkspaceFile } from '../storage/workspace.js';
 import { buildNativeArk, nativeCardSchema } from '../domain/card.js';
-import { renderImageCard, runPythonScript } from './python.js';
+import { rasterizeSvg, renderImageCard, runPythonScript } from './python.js';
 export { workspaceFor } from '../storage/workspace.js';
 
 export interface ToolContext {
@@ -106,8 +106,12 @@ export function makeTools(ctx: ToolContext) {
       return { sent: true };
     }), { name: 'send_text', description: '立即向当前会话发送一段文字，用于必要的进度沟通或文件前后分段交流；不要重复发送。', schema: z.object({ text: z.string().min(1).max(4000) }) }),
     tool(wrap(async ({ file, kind }: { file: string; kind: DeliveryKind }) => {
-      const actual = safeFile(ctx.conversationId, file);
+      let actual = safeFile(ctx.conversationId, file);
       const deliveryKey = ctx.taskId ? `task:${ctx.taskId}:${kind}:${createHash('sha256').update(actual).digest('hex')}` : undefined;
+      if (kind === 'image' && path.extname(actual).toLowerCase() === '.svg') {
+        if (!config.tools.python || !permitted(['process', 'workspaceRead', 'workspaceWrite'], config)) throw new Error('SVG 图片需要启用 Python 沙箱和工作区读写权限才能转换发送');
+        actual = (await rasterizeSvg(ctx.conversationId, actual, ctx.signal)).path;
+      }
       await ctx.reply.send(ctx.conversationId, ctx.scope, ctx.replyTo, kind, actual, path.basename(actual), deliveryKey);
       return { sent: true, file: path.basename(actual), kind };
     }), { name: 'send_media', description: '立即向当前会话发送本会话工作目录的文件、图片或视频；成功后才能说已发送。', schema: z.object({ file: z.string(), kind: config.tools.voice ? z.enum(['image', 'voice', 'video', 'file']) : z.enum(['image', 'video', 'file']) }) }),

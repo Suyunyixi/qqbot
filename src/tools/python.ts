@@ -78,8 +78,21 @@ export async function renderImageCard(conversationId: string, data: unknown, sig
   return image;
 }
 
+/** QQ image uploads expect a raster image, so render SVG inside the sandbox. */
+export async function rasterizeSvg(conversationId: string, file: string, signal?: AbortSignal) {
+  const actual = resolveWorkspaceFile(conversationId, file);
+  if (fs.statSync(actual).size > MAX_FILE) throw new Error('SVG 文件大小超限');
+  const script = fs.readFileSync(path.resolve(process.cwd(), 'assets/svg_to_png.py'));
+  const files = [{ path: 'convert.py', data: script.toString('base64') }, { path: 'image.svg', data: fs.readFileSync(actual).toString('base64') }];
+  const result = exportResults(conversationId, await callRunner({ script: 'convert.py', files, timeoutSeconds: 30 }, signal), `converted/${randomUUID()}/`);
+  if (result.exitCode !== 0 || result.timedOut) throw new Error(`SVG 转 PNG 失败：${result.stderr || result.stdout || '超时'}`);
+  const image = result.files.find((entry) => entry.virtualPath.endsWith('/image.png'));
+  if (!image) throw new Error('SVG 转换未生成 PNG');
+  return image;
+}
+
 export async function checkPythonRunner(): Promise<void> {
-  const script = "import socket\ntry:\n socket.socket()\n raise RuntimeError('network unexpectedly enabled')\nexcept PermissionError:\n pass\nfrom PIL import Image, ImageFont\nImageFont.truetype('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', 18)\nprint('python-sandbox-ok')\n";
+  const script = "import socket\ntry:\n socket.socket()\n raise RuntimeError('network unexpectedly enabled')\nexcept PermissionError:\n pass\nfrom PIL import Image, ImageFont\nimport cairosvg\nImageFont.truetype('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', 18)\nprint('python-sandbox-ok')\n";
   const result = await callRunner({ script: 'check.py', files: [{ path: 'check.py', data: Buffer.from(script).toString('base64') }], timeoutSeconds: 10 });
   if (result.exitCode !== 0 || !result.stdout.includes('python-sandbox-ok')) throw new Error(result.stderr || 'Python 沙箱自检失败');
 }

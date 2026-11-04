@@ -10,6 +10,10 @@ const { Store } = await import('../src/storage/store.js');
 const { persona } = await import('../src/agent/runtime.js');
 const { handlePersona } = await import('../src/admin/api.js');
 const { workspaceFor } = await import('../src/storage/workspace.js');
+const { WorkspaceBackend } = await import('../src/storage/backend.js');
+const { ReplyRuntime } = await import('../src/delivery/reply.js');
+const { TaskManager } = await import('../src/agent/task-manager.js');
+const { makeTools } = await import('../src/tools/registry.js');
 const { runPythonScript } = await import('../src/tools/python.js');
 initConfig();
 
@@ -38,6 +42,23 @@ describe('人格管理', () => {
 });
 
 describe('Python 沙箱文件交换', () => {
+  it('Deep Agents 写入真实工作区路径后，相同路径和相对路径均能发送', async () => {
+    const id = 'write-deliver'; const root = workspaceFor(id); const physical = path.join(root, 'created.txt');
+    const backend = new WorkspaceBackend(id);
+    expect((await backend.write(physical, 'content')).error).toBeUndefined();
+    expect(fs.readFileSync(physical, 'utf8')).toBe('content');
+    expect((await backend.glob(path.join(root, '*.txt'))).files).toHaveLength(1);
+    const store = new Store(':memory:'); const sent = vi.fn(async () => ({ id: 'ok' }));
+    const reply = new ReplyRuntime(store, { send: sent }); const tasks = new TaskManager(store, async () => '', async () => {});
+    try {
+      const media = makeTools({ conversationId: id, scope: 'group', store, reply, tasks, background: false }).find((item) => item.name === 'send_media')!;
+      const a = JSON.parse(String(await media.invoke({ file: physical, kind: 'file' }))) as { ok: boolean };
+      const b = JSON.parse(String(await media.invoke({ file: 'created.txt', kind: 'file' }))) as { ok: boolean };
+      expect(a.ok).toBe(true); expect(b.ok).toBe(true); expect(sent).toHaveBeenCalledTimes(2);
+      expect(sent.mock.calls[0]?.[0].content).toBe(fs.realpathSync(physical));
+      expect(() => backend.write(path.join(workspaceFor('other-conversation'), 'private.txt'), 'x')).toThrow('当前会话');
+    } finally { tasks.stop(); store.close(); }
+  });
   it('传入当前会话脚本和数据，回写输出文件到同一工作区', async () => {
     const root = workspaceFor('python-a');
     fs.writeFileSync(path.join(root, 'script.py'), 'print(1)'); fs.writeFileSync(path.join(root, 'input.txt'), 'source');

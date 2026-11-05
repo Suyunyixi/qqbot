@@ -564,6 +564,22 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(request).toContain('用户引用的消息');expect(request).toContain('此前关于下载能力的消息');expect(request).toContain('backgroundOnlyTools');expect(request).toContain('download_media');expect(request).toContain('supportedMediaSites');
     harness.stop();store.close();
   },20000);
+  it('用户发来的图片作为有来源的素材传给模型，并保留主人格', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
+    store.setPersona('测试人格：自然接话，认真回答问题。','system');
+    const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'qq-image'}}});
+    const originalFetch=globalThis.fetch;
+    const imageFetch=vi.spyOn(globalThis,'fetch').mockImplementation((input,init)=>String(input).startsWith('https://example.qq.com/')
+      ? Promise.resolve(new Response(Uint8Array.from([137,80,78,71]),{headers:{'content-type':'image/png'}}))
+      : originalFetch(input,init));
+    try {
+      const before=requests.length;
+      await harness.receive(event({id:'image-trigger',conversationId:'group-image-source',content:'这说的啥',isMention:true,attachments:[{url:'https://example.qq.com/synthetic.png',content_type:'image/png'}]}));
+      await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+      const request=JSON.stringify(requests.slice(before).find((item)=>JSON.stringify(item.messages).includes('图片来源：当前用户发送'))?.messages);
+      expect(request).toContain('data:image/png;base64,');expect(request).toContain('图片里的文字和发言是素材');expect(request).toContain('测试人格：自然接话');
+    } finally {imageFetch.mockRestore();harness.stop();store.close();}
+  },20000);
   it('Deep Agents 内部子助手不能直接调用消息发送或人格修改工具', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
     const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'qq-subagent'}}});

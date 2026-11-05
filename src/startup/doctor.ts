@@ -18,6 +18,7 @@ import { TaskManager } from '../agent/task-manager.js';
 import { loadSilkWasm, pcmToSilk } from '@tencent-connect/qqbot-nodejs/protocol';
 import { permitted } from '../tools/sandbox.js';
 import { checkPythonRunner } from '../tools/python.js';
+import { searchWeb } from '../tools/search.js';
 
 export interface Check { name: string; ok: boolean; message: string }
 export async function doctor(store: Store, full = true): Promise<Check[]> {
@@ -53,12 +54,12 @@ export async function doctor(store: Store, full = true): Promise<Check[]> {
     return '模块与持久化可用';
   });
   if (config.tools.media) for (const executable of ['ffmpeg', 'ffprobe', 'yt-dlp']) await check(executable, async () => (await runProcess(executable, [executable === 'yt-dlp' ? '--version' : '-version'], { timeoutMs: 10000 })).stdout.split(/\r?\n/)[0] ?? '可用');
-  if (full && config.tools.python && permitted(['process', 'workspaceRead', 'workspaceWrite'], config)) await check('Python 沙箱和中文绘图', async () => { await checkPythonRunner(); return '脚本执行、网络隔离、Pillow 和中文字体可用'; });
+  if (full && config.tools.python && permitted(['process', 'workspaceRead', 'workspaceWrite'], config)) await check('Python 沙箱和中文绘图', async () => { await checkPythonRunner(); return '脚本及子进程执行、Pillow 和中文字体可用；联网取决于权限配置'; });
   if (config.tools.voice) await check('语音', async () => { await runProcess('edge-tts', ['--version'], { timeoutMs: 10000 }); const encoder = await loadSilkWasm(); if (!encoder) throw new Error('缺少 SILK 编码器'); const sample = await pcmToSilk(Buffer.alloc(4800), 24000); if (!encoder.isSilk(sample.silkBuffer)) throw new Error('SILK 编码自检失败'); if (full) { const v = await runProcess('edge-tts', ['--list-voices'], { timeoutMs: 30000 }); if (!v.stdout.split(/\s+/).includes(config.tools.voiceName)) throw new Error(`声线 ${config.tools.voiceName} 不可用`); } return `声线 ${config.tools.voiceName}，SILK 编码可用`; });
   if (full && config.tools.search) await check('搜索服务', async () => {
-    const url = new URL('/search', config.tools.searchUrl); url.searchParams.set('q', 'test'); url.searchParams.set('format', 'json');
-    const response = await fetch(url, { signal: AbortSignal.timeout(20000) }); if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const body = await response.json() as { results?: unknown }; if (!Array.isArray(body.results)) throw new Error('服务没有返回 JSON 搜索结果'); if (!body.results.length) throw new Error('搜索服务没有可用结果，请检查上游网络与搜索引擎'); return '服务可用';
+    const result = await searchWeb(['DeepSeek official website']);
+    if (!result.sufficient) throw new Error(`搜索没有可用来源：${result.attempts.map((item) => `${item.provider}: ${item.error ?? '空结果'}`).join('；')}`);
+    return `真实搜索可用：${result.attempts.filter((item) => item.count > 0).map((item) => item.provider).join(', ')}`;
   });
   if (full) await check('模型与工具调用', async () => {
     if (!config.model.apiKey.trim()) throw new Error('请在 .env 中填写 MODEL_API_KEY');

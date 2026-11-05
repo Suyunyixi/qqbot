@@ -3,6 +3,7 @@ import { readConfig } from '../config/settings.js';
 import { Store } from '../storage/store.js';
 import type { DeliveryItem, DeliveryKind, Scope, Sender } from '../domain/types.js';
 import { resolveWorkspaceFile } from '../storage/workspace.js';
+import { splitMarkdown } from './markdown.js';
 
 export function splitText(text: string, limit: number): string[] {
   const chunks: string[] = [];
@@ -39,7 +40,7 @@ export class ReplyRuntime {
     }
     const previous = this.queues.get(conversationId) ?? Promise.resolve();
     const next = previous.catch(() => {}).then(async () => {
-      const pieces = kind === 'text' ? splitText(content, readConfig().delivery.chunkCharacters) : [content];
+      const pieces = kind === 'text' ? splitMarkdown(content, readConfig().delivery.chunkCharacters) : [content];
       for (const [index, piece] of pieces.entries()) {
         const item: DeliveryItem = { id: deliveryKey ? `${deliveryKey}:${index}` : randomUUID(), conversationId, scope, replyTo, kind, content: piece, fileName };
         const state = this.store.outboxState(item.id);

@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import signal
 from pathlib import Path, PurePosixPath
 import subprocess
 import sys
@@ -12,10 +13,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from PIL import __version__ as pillow_version
 
-MAX_REQUEST = 24 * 1024 * 1024
-MAX_FILES = 32
-MAX_FILE = 12 * 1024 * 1024
-MAX_OUTPUT = 16 * 1024 * 1024
+MAX_REQUEST = 140 * 1024 * 1024
+MAX_FILES = 128
+MAX_FILE = 50 * 1024 * 1024
+MAX_OUTPUT = 100 * 1024 * 1024
 gate = threading.BoundedSemaphore(1)
 
 
@@ -34,14 +35,20 @@ def digest(data):
 
 def execute(request):
     script = relative_path(request.get('script'))
-    if script.suffix.lower() != '.py':
-        raise ValueError('只允许执行 .py 文件')
+    if script.suffix.lower() not in ('.py', '.sh'):
+        raise ValueError('只允许执行 .py 或 .sh 文件')
     inputs = request.get('files', [])
     if not isinstance(inputs, list) or len(inputs) > MAX_FILES:
         raise ValueError('输入文件数量超限')
     timeout = request.get('timeoutSeconds', 30)
-    if not isinstance(timeout, int) or not 1 <= timeout <= 120:
-        raise ValueError('超时时间必须为 1 至 120 秒')
+    if not isinstance(timeout, int) or not 1 <= timeout <= 900:
+        raise ValueError('超时时间必须为 1 至 900 秒')
+    network = request.get('network', False)
+    if not isinstance(network, bool):
+        raise ValueError('网络权限格式无效')
+    selected_outputs = request.get('outputs')
+    if selected_outputs is not None and (not isinstance(selected_outputs, list) or len(selected_outputs) > MAX_FILES):
+        raise ValueError('输出路径数量超限')
     with tempfile.TemporaryDirectory(prefix='python-job-', dir='/tmp') as temp:
         root = Path(temp)
         before = {}
@@ -63,19 +70,39 @@ def execute(request):
             raise ValueError('脚本未包含在输入文件中')
         env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': temp, 'TMPDIR': temp, 'PYTHONDONTWRITEBYTECODE': '1', 'LANG': 'C.UTF-8'}
         with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            process = subprocess.Popen([sys.executable, '-I', '/runner/sandbox.py', str(script_path), '1' if network else '0'], cwd=temp, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, start_new_session=True)
             try:
-                result = subprocess.run([sys.executable, '-I', '/runner/sandbox.py', str(script_path)], cwd=temp, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, timeout=timeout, check=False)
-                exit_code, timed_out = result.returncode, False
+                exit_code, timed_out = process.wait(timeout=timeout), False
             except subprocess.TimeoutExpired:
                 exit_code, timed_out = None, True
+            finally:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
             stdout.seek(0); stderr.seek(0)
             out = stdout.read(65536).decode('utf-8', 'replace')
             err = stderr.read(65536).decode('utf-8', 'replace')
+        if exit_code != 0 or timed_out:
+            return {'exitCode': exit_code, 'timedOut': timed_out, 'stdout': out, 'stderr': err, 'files': [], 'network': network}
         outputs, total = [], 0
-        for item in root.rglob('*'):
-            if item.is_symlink() or not item.is_file():
+        targets = []
+        if selected_outputs is not None:
+            for name in selected_outputs:
+                target = root.joinpath(*relative_path(name).parts)
+                if not target.exists() or target.is_symlink() or not target.resolve().is_relative_to(root):
+                    raise ValueError('指定的输出不存在或不在任务目录')
+                targets.append(target)
+        candidates = root.rglob('*') if selected_outputs is None else (item for target in targets for item in ([target] if target.is_file() else target.rglob('*') if target.is_dir() else []))
+        seen = set()
+        for item in candidates:
+            if item.is_symlink() or not item.is_file() or not item.resolve().is_relative_to(root):
                 continue
             name = item.relative_to(root).as_posix()
+            if name in seen:
+                continue
+            seen.add(name)
             size = item.stat().st_size
             if size > MAX_FILE:
                 raise ValueError('输出文件大小超限')
@@ -86,7 +113,7 @@ def execute(request):
             if len(outputs) >= MAX_FILES or total > MAX_OUTPUT:
                 raise ValueError('输出文件数量或总大小超限')
             outputs.append({'path': name, 'data': base64.b64encode(data).decode(), 'size': size})
-        return {'exitCode': exit_code, 'timedOut': timed_out, 'stdout': out, 'stderr': err, 'files': outputs, 'network': False}
+        return {'exitCode': exit_code, 'timedOut': timed_out, 'stdout': out, 'stderr': err, 'files': outputs, 'network': network}
 
 
 class Handler(BaseHTTPRequestHandler):

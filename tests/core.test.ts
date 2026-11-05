@@ -259,6 +259,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
   let server: http.Server;
   let port = 0;
   let fileToSend = '';
+  let releaseInterjection: (() => void) | undefined;
   const requests: Array<Record<string, unknown>> = [];
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -272,6 +273,10 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
           return;
         }
         const allText = JSON.stringify(parsed.messages);
+        if (allText.includes('插话整合测试') && !allText.includes('关键补充')) {
+          releaseInterjection = () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ id:'held',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:'旧答案'},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2} })); };
+          return;
+        }
         const asyncScenario = allText.includes('后台处理指定测试');
         const isChild = allText.includes('容器沙箱中的后台任务执行者');
         const callback = allText.includes('后台任务通知');
@@ -280,7 +285,8 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
         const permissionScenario = allText.includes('尝试写入权限验证');
         const last = parsed.messages.at(-1);
         let reply: Record<string, unknown>;
-        if (permissionScenario && last?.role !== 'tool') reply = { role: 'assistant', content: null, tool_calls: [{ id: 'denied-write', type: 'function', function: { name: 'write_file', arguments: JSON.stringify({ file_path: '/denied.txt', content: 'must not be written' }) } }] };
+        if (allText.includes('插话整合测试') && allText.includes('关键补充')) reply = { role:'assistant',content:'已看到群友的关键补充' };
+        else if (permissionScenario && last?.role !== 'tool') reply = { role: 'assistant', content: null, tool_calls: [{ id: 'denied-write', type: 'function', function: { name: 'write_file', arguments: JSON.stringify({ file_path: '/denied.txt', content: 'must not be written' }) } }] };
         else if (permissionScenario) reply = { role: 'assistant', content: '权限测试完成' };
         else if (thinkingScenario && last?.role !== 'tool') reply = { role: 'assistant', content: null, reasoning_content: 'provider-thinking-token', tool_calls: [{ id: 'thinking-call', type: 'function', function: { name: 'send_text', arguments: JSON.stringify({ text: '处理中' }) } }] };
         else if (thinkingScenario) {
@@ -353,6 +359,23 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(JSON.stringify(requests.at(-1)?.messages)).toContain('小王');
     harness.stop(); store.close();
   }, 20000);
+  it('正在处理时吸收群友插话，未触发消息本身不启动模型', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
+    const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'ok'}}});
+    const before=requests.length;releaseInterjection=undefined;
+    await harness.receive(event({id:'first',conversationId:'group-interject',content:'插话整合测试',isMention:true}));
+    await vi.waitFor(()=>expect(releaseInterjection).toBeDefined(),{timeout:15000});
+    expect(await harness.receive(event({id:'aside',conversationId:'group-interject',senderId:'other',senderName:'另一位群友',content:'关键补充',isMention:false}))).toBe(false);
+    expect(await harness.receive(event({id:'earlier-aside',conversationId:'group-interject',senderId:'third',senderName:'第三位群友',content:'长任务期间的纠正',timestamp:new Date(Date.now()-600000).toISOString(),isMention:false}))).toBe(false);
+    expect(requests.length).toBe(before+1);
+    releaseInterjection!();
+    await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+    expect(delivered[0]?.content).toBe('已看到群友的关键补充');
+    expect(JSON.stringify(requests.at(-1)?.messages)).toContain('另一位群友');
+    expect(JSON.stringify(requests.at(-1)?.messages)).toContain('长任务期间的纠正');
+    expect(requests.length).toBe(before+2);
+    harness.stop();store.close();
+  },20000);
   it('积累大量静默消息后，触发时先生成摘要并保留全部原文', async () => {
     const store = new Store(':memory:');
     const delivered: DeliveryItem[] = [];

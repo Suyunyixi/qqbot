@@ -4,9 +4,11 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { sqlitePath } from '../config/settings.js';
 import type { DeliveryItem, InboundEvent, Scope } from '../domain/types.js';
+import { MemoryRepository } from './memory.js';
 
 export class Store {
   readonly db: Database.Database;
+  readonly memory: MemoryRepository;
   constructor(file = sqlitePath) {
     this.db = new Database(file);
     if (file !== ':memory:') {
@@ -68,6 +70,8 @@ export class Store {
         platform_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
     `);
+    this.memory = new MemoryRepository(this.db);
+    this.memory.bootstrapOwner(this.qqCredentials()?.userOpenid);
   }
   qqCredentials(): { appId: string; appSecret: string; userOpenid?: string } | undefined {
     const row = this.db.prepare('SELECT app_id,app_secret,user_openid FROM qq_credentials WHERE id=1').get() as { app_id: string; app_secret: string; user_openid: string | null } | undefined;
@@ -76,10 +80,15 @@ export class Store {
   saveQQCredentials(value: { appId: string; appSecret: string; userOpenid?: string }): void {
     if (!value.appId || !value.appSecret) throw new Error('QQ 凭据不完整');
     this.db.prepare('INSERT INTO qq_credentials VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET app_id=excluded.app_id,app_secret=excluded.app_secret,user_openid=excluded.user_openid,updated_at=excluded.updated_at').run(value.appId, value.appSecret, value.userOpenid ?? null, new Date().toISOString());
+    this.memory.bootstrapOwner(value.userOpenid);
   }
   record(event: InboundEvent): boolean {
-    return this.db.prepare(`INSERT OR IGNORE INTO messages (id,conversation_id,scope,sender_id,sender_name,content,timestamp,direction,attachments,raw,is_mention) VALUES (?,?,?,?,?,?,?,'in',?,?,?)`)
-      .run(event.id, event.conversationId, event.scope, event.senderId, event.senderName ?? null, event.content, event.timestamp, JSON.stringify(event.attachments), event.raw === undefined ? null : JSON.stringify(event.raw), Number(event.isMention)).changes > 0;
+    return this.db.transaction(() => {
+      const created = this.db.prepare(`INSERT OR IGNORE INTO messages (id,conversation_id,scope,sender_id,sender_name,content,timestamp,direction,attachments,raw,is_mention) VALUES (?,?,?,?,?,?,?,'in',?,?,?)`)
+        .run(event.id, event.conversationId, event.scope, event.senderId, event.senderName ?? null, event.content, event.timestamp, JSON.stringify(event.attachments), event.raw === undefined ? null : JSON.stringify(event.raw), Number(event.isMention)).changes > 0;
+      if (created) this.memory.observe(event.scope, event.conversationId, event.senderId, event.senderName);
+      return created;
+    })();
   }
   recordSent(item: DeliveryItem, platformId?: string): void {
     let cardTitle = 'QQ 卡片';
@@ -138,6 +147,7 @@ export class Store {
   listTasks(conversationId: string): TaskRow[] { return this.db.prepare('SELECT * FROM tasks WHERE conversation_id=? ORDER BY created_at DESC LIMIT 20').all(conversationId) as TaskRow[]; }
   addTaskUpdate(id: string, content: string): void { this.db.prepare('INSERT INTO task_updates(task_id,content) VALUES (?,?)').run(id, content); }
   addProgress(taskId: string, content: string): string { const id = randomUUID(); this.db.prepare('INSERT INTO task_progress(id,task_id,content,created_at) VALUES (?,?,?,?)').run(id, taskId, content, new Date().toISOString()); return id; }
+  logTask(taskId: string, content: string): void { this.db.prepare('INSERT INTO task_progress(id,task_id,content,sent,created_at) VALUES (?,?,?,1,?)').run(randomUUID(), taskId, content.slice(0, 1000), new Date().toISOString()); }
   pendingProgress(): Array<{ id: string; task_id: string; content: string }> { return this.db.prepare("SELECT p.id,p.task_id,p.content FROM task_progress p JOIN tasks t ON t.id=p.task_id WHERE p.sent=0 AND t.status IN ('running','waiting') ORDER BY p.created_at").all() as Array<{ id: string; task_id: string; content: string }>; }
   markProgress(id: string): void { this.db.prepare('UPDATE task_progress SET sent=1 WHERE id=?').run(id); }
   takeTaskUpdates(id: string): string[] {

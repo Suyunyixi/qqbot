@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>大肥鱼 · 控制台</title><link rel="stylesheet" href="/admin.css"></head>
+<body><div class="app">
+  <aside class="sidebar"><div class="brand"><div class="logo">🐋</div><div><strong>大肥鱼</strong><span>QQ AGENT CONSOLE</span></div></div>
+    <div class="nav-label">工作台</div><nav id="nav">
+      <button data-page="overview" class="nav active"><span>◫</span>运行概览</button>
+      <button data-page="groups" class="nav"><span>◉</span>群聊与配置</button>
+      <button data-page="tasks" class="nav"><span>▤</span>后台任务</button>
+      <button data-page="memories" class="nav"><span>◇</span>记忆管理</button>
+      <button data-page="identity" class="nav"><span>♙</span>身份与权限</button>
+      <button data-page="persona" class="nav"><span>✧</span>主人格</button>
+      <button data-page="deliveries" class="nav"><span>⇧</span>交付记录</button>
+    </nav><div class="sidebar-footer"><span class="dot" id="side-dot"></span><span id="side-status">正在连接</span><small>本地管理控制台</small></div>
+  </aside>
+  <main class="main"><header class="topbar"><div><div class="eyebrow">QQ AGENT / <span id="crumb">运行概览</span></div><h1 id="title">运行概览</h1><p id="subtitle">查看机器人连接、任务与运行状态。</p></div><div class="top-actions"><span class="status-pill"><i class="dot" id="top-dot"></i><span id="top-status">正在检查</span></span><button class="btn quiet" id="refresh">↻ 刷新</button></div></header>
+  <div class="content" id="view"><div class="empty">正在加载…</div></div><footer>运行在你的 Docker 沙箱中 <span>·</span> 数据与工作区由宿主机持久化</footer></main>
+</div><div id="toast" role="status" class="toast" hidden></div><script src="/admin.js" defer></script></body></html>

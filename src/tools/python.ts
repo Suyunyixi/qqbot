@@ -3,11 +3,11 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { readConfig } from '../config/settings.js';
-import { resolveWorkspaceFile, workspaceFor } from '../storage/workspace.js';
+import { resolveWorkspaceEntry, resolveWorkspaceFile, workspaceFor } from '../storage/workspace.js';
 
-const MAX_FILE = 12 * 1024 * 1024;
-const MAX_TOTAL = 16 * 1024 * 1024;
-const resultSchema = z.object({ exitCode: z.number().int().nullable(), timedOut: z.boolean(), stdout: z.string().max(65536), stderr: z.string().max(65536), network: z.literal(false), files: z.array(z.object({ path: z.string().min(1).max(1024), data: z.string().max(17000000), size: z.number().int().min(0).max(MAX_FILE) })).max(32) });
+const MAX_FILE = 50 * 1024 * 1024;
+const MAX_TOTAL = 100 * 1024 * 1024;
+const resultSchema = z.object({ exitCode: z.number().int().nullable(), timedOut: z.boolean(), stdout: z.string().max(65536), stderr: z.string().max(65536), network: z.boolean(), files: z.array(z.object({ path: z.string().min(1).max(1024), data: z.string().max(71000000), size: z.number().int().min(0).max(MAX_FILE) })).max(128) });
 type Input = { path: string; data: string };
 
 function checkedRelative(name: string): string[] {
@@ -31,8 +31,9 @@ function saveOutput(root: string, name: string, bytes: Buffer): string {
   return target;
 }
 
-async function callRunner(request: { script: string; files: Input[]; timeoutSeconds: number }, signal?: AbortSignal) {
-  const response = await fetch(new URL('/run', readConfig().tools.pythonRunnerUrl), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout((request.timeoutSeconds + 150) * 1000)]) : AbortSignal.timeout((request.timeoutSeconds + 150) * 1000) });
+async function callRunner(request: { script: string; files: Input[]; timeoutSeconds: number; network?: boolean; outputs?: string[] }, signal?: AbortSignal) {
+  const timeout = AbortSignal.timeout((request.timeoutSeconds + 930) * 1000);
+  const response = await fetch(new URL('/run', readConfig().tools.pythonRunnerUrl), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request), signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
   const payload: unknown = await response.json();
   if (!response.ok) throw new Error(`Python 沙箱错误：${typeof payload === 'object' && payload && 'error' in payload ? String(payload.error) : response.status}`);
   return resultSchema.parse(payload);
@@ -51,21 +52,35 @@ function exportResults(conversationId: string, result: z.infer<typeof resultSche
   return { ...result, files };
 }
 
-export async function runPythonScript(conversationId: string, script: string, inputs: string[], timeoutSeconds: number, signal?: AbortSignal) {
+function gatherFiles(conversationId: string, names: string[]): Input[] {
   const root = fs.realpathSync(workspaceFor(conversationId));
   const files: Input[] = []; const seen = new Set<string>(); let total = 0;
-  for (const name of [script, ...inputs]) {
-    const actual = resolveWorkspaceFile(conversationId, name);
+  const add = (actual: string) => {
+    const stat = fs.lstatSync(actual);
+    if (stat.isSymbolicLink()) throw new Error('输入目录不能包含符号链接');
+    if (stat.isDirectory()) { for (const entry of fs.readdirSync(actual)) add(path.join(actual,entry)); return; }
+    if (!stat.isFile()) throw new Error('输入只能是普通文件或目录');
     const relative = path.relative(root, actual).split(path.sep).join('/'); checkedRelative(relative);
-    if (seen.has(relative)) continue; seen.add(relative);
-    if (fs.statSync(actual).size > MAX_FILE) throw new Error('输入文件大小超限');
+    if (seen.has(relative)) return; seen.add(relative);
+    if (stat.size > MAX_FILE) throw new Error('输入文件大小超限');
     const data = fs.readFileSync(actual); total += data.length;
-    if (data.length > MAX_FILE || total > MAX_TOTAL || files.length >= 32) throw new Error('输入文件数量或大小超限');
+    if (data.length > MAX_FILE || total > MAX_TOTAL || files.length >= 127) throw new Error('输入文件数量或大小超限');
     files.push({ path: relative, data: data.toString('base64') });
-  }
+  };
+  for (const name of names) add(resolveWorkspaceEntry(conversationId, name));
+  return files;
+}
+export async function runPythonScript(conversationId: string, script: string, inputs: string[], timeoutSeconds: number, signal?: AbortSignal, outputs?: string[]) {
+  const root = fs.realpathSync(workspaceFor(conversationId));
+  const files = gatherFiles(conversationId, [script, ...inputs]);
   const actualScript = resolveWorkspaceFile(conversationId, script);
   const relativeScript = path.relative(root, actualScript).split(path.sep).join('/');
-  return exportResults(conversationId, await callRunner({ script: relativeScript, files, timeoutSeconds }, signal));
+  return exportResults(conversationId, await callRunner({ script: relativeScript, files, timeoutSeconds, network:readConfig().sandbox.permissions.network, outputs }, signal));
+}
+export async function runShellCommand(conversationId: string, command: string, inputs: string[], timeoutSeconds: number, signal?: AbortSignal, outputs?: string[]) {
+  const script = `.command-${randomUUID()}.sh`;
+  const files = [{path:script,data:Buffer.from(command).toString('base64')}, ...gatherFiles(conversationId, inputs)];
+  return exportResults(conversationId, await callRunner({script,files,timeoutSeconds,network:readConfig().sandbox.permissions.network,outputs},signal));
 }
 
 export async function renderImageCard(conversationId: string, data: unknown, signal?: AbortSignal) {
@@ -92,7 +107,7 @@ export async function rasterizeSvg(conversationId: string, file: string, signal?
 }
 
 export async function checkPythonRunner(): Promise<void> {
-  const script = "import socket\ntry:\n socket.socket()\n raise RuntimeError('network unexpectedly enabled')\nexcept PermissionError:\n pass\nfrom PIL import Image, ImageFont\nimport cairosvg\nImageFont.truetype('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', 18)\nprint('python-sandbox-ok')\n";
+  const script = "import socket, subprocess\ntry:\n socket.socket()\n raise RuntimeError('network unexpectedly enabled')\nexcept PermissionError:\n pass\nassert subprocess.check_output(['/bin/sh','-c','printf subprocess-ok']).decode() == 'subprocess-ok'\nfrom PIL import Image, ImageFont\nimport cairosvg\nImageFont.truetype('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', 18)\nprint('python-sandbox-ok')\n";
   const result = await callRunner({ script: 'check.py', files: [{ path: 'check.py', data: Buffer.from(script).toString('base64') }], timeoutSeconds: 10 });
   if (result.exitCode !== 0 || !result.stdout.includes('python-sandbox-ok')) throw new Error(result.stderr || 'Python 沙箱自检失败');
 }

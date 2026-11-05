@@ -1,6 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { persona } from '../agent/runtime.js';
 import type { Store } from '../storage/store.js';
+import type { Harness } from '../agent/harness.js';
+import { groupSettings, groupSettingsSchema } from '../config/group.js';
+import { toolPermissions } from '../tools/sandbox.js';
+import { z } from 'zod';
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value));
@@ -20,4 +24,79 @@ export async function handlePersona(req: IncomingMessage, res: ServerResponse, s
     store.setAppSetting('persona', parsed.persona);
     json(res, 200, { ok: true });
   } catch (error) { json(res, 400, { error: error instanceof Error ? error.message : '内容无效' }); }
+}
+
+async function body(req: IncomingMessage): Promise<unknown> {
+  let text = '';
+  for await (const chunk of req) { text += String(chunk); if (Buffer.byteLength(text) > 128000) throw new Error('内容过长'); }
+  return JSON.parse(text || '{}') as unknown;
+}
+const id = z.string().min(1).max(300);
+/** Local management API; mutating calls require a same-origin browser request. */
+export async function handleAdmin(req: IncomingMessage, res: ServerResponse, store: Store, harness: Harness | undefined): Promise<void> {
+  const host = req.headers.host ?? '';
+  if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(host)) { json(res, 403, { error: '管理接口仅允许本机访问' }); return; }
+  const url = new URL(req.url ?? '/', 'http://localhost');
+  if (req.method !== 'GET' && (req.headers.origin !== `http://${host}` || !req.headers['content-type']?.startsWith('application/json'))) { json(res, 403, { error: '请求来源无效' }); return; }
+  try {
+    if (req.method === 'GET' && url.pathname === '/api/conversations') {
+      const rows = store.db.prepare(`SELECT conversation_id,scope,COUNT(*) AS message_count,MAX(timestamp) AS last_activity FROM messages GROUP BY conversation_id,scope ORDER BY MAX(seq) DESC LIMIT 500`).all() as Array<{conversation_id:string;scope:string;message_count:number;last_activity:string}>;
+      json(res, 200, { conversations: rows.map((row) => ({ ...row, settings: row.scope === 'group' ? groupSettings(store, row.conversation_id) : undefined })) }); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/messages') {
+      const conversationId = id.parse(url.searchParams.get('conversationId'));
+      const rows = store.db.prepare('SELECT seq,id,scope,sender_id,sender_name,content,timestamp,direction,attachments,is_mention,raw FROM messages WHERE conversation_id=? ORDER BY seq DESC LIMIT 100').all(conversationId) as Array<Record<string, unknown>>;
+      json(res, 200, { messages: rows.reverse().map(({raw, ...row}) => { let eventType: unknown; try { eventType = typeof raw === 'string' ? (JSON.parse(raw) as {rawEventType?:unknown}).rawEventType : undefined; } catch { /* older record */ } return { ...row, eventType }; }) }); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/tools') { json(res, 200, { tools: Object.keys(toolPermissions).filter((name) => !name.startsWith('owner_')).sort() }); return; }
+    if (req.method === 'PUT' && url.pathname === '/api/group') {
+      const input = z.object({ conversationId: id, settings: groupSettingsSchema }).parse(await body(req));
+      if (!store.db.prepare("SELECT 1 FROM messages WHERE conversation_id=? AND scope='group' LIMIT 1").get(input.conversationId)) throw new Error('群聊不存在');
+      store.setSetting(input.conversationId, 'groupSettings', JSON.stringify(input.settings)); json(res, 200, { ok: true }); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/identities') { json(res, 200, { identities: store.memory.listIdentities(), owner: store.memory.owner() }); return; }
+    if (req.method === 'POST' && url.pathname === '/api/identities/link') {
+      const input = z.object({ source: id, target: id }).parse(await body(req)); store.memory.link(input.source, input.target); json(res, 200, { ok: true }); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/identities/detach') {
+      const input = z.object({ scope:z.enum(['group','c2c']), conversationId:id, externalId:id }).parse(await body(req));
+      json(res, 200, { userId: store.memory.detach(input.scope, input.conversationId, input.externalId) }); return;
+    }
+    if (req.method === 'PUT' && url.pathname === '/api/identities/owner') {
+      const input = z.object({ userId: id }).parse(await body(req)); store.memory.setOwner(input.userId); json(res, 200, { ok: true }); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/memories') { json(res, 200, { memories: store.memory.list() }); return; }
+    if (req.method === 'POST' && url.pathname === '/api/memories') {
+      const input = z.object({ type: z.enum(['user','group']), subjectId: id, content: z.string().min(1).max(2000), conversationId: id }).parse(await body(req));
+      if (input.type === 'user' && !store.memory.listIdentities().some((entry) => entry.user_id === input.subjectId)) throw new Error('用户身份不存在');
+      if (input.type === 'group' && !store.db.prepare("SELECT 1 FROM messages WHERE scope='group' AND conversation_id=?").get(input.subjectId)) throw new Error('群聊不存在');
+      json(res, 200, { id: store.memory.add(input.type, input.subjectId, input.content, input.conversationId) }); return;
+    }
+    if (req.method === 'PUT' && url.pathname === '/api/memories') {
+      const input = z.object({ id, content: z.string().min(1).max(2000) }).parse(await body(req)); if (!store.memory.edit(input.id, input.content)) throw new Error('记忆不存在'); json(res, 200, { ok: true }); return;
+    }
+    if (req.method === 'DELETE' && url.pathname === '/api/memories') {
+      const input = z.object({ id }).parse(await body(req)); if (!store.memory.delete(input.id)) throw new Error('记忆不存在'); json(res, 200, { ok: true }); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/tasks') {
+      const tasks = store.db.prepare('SELECT * FROM tasks ORDER BY created_at DESC LIMIT 200').all();
+      const progress = store.db.prepare('SELECT task_id,content,created_at,sent FROM task_progress ORDER BY created_at DESC LIMIT 500').all();
+      json(res, 200, { tasks, progress }); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/tasks/action') {
+      if (!harness) throw new Error('机器人运行时尚未启动');
+      const input = z.object({ id, action: z.enum(['cancel','retry','update']), instruction: z.string().max(5000).optional() }).parse(await body(req));
+      const task = store.task(input.id); if (!task) throw new Error('任务不存在');
+      const result = input.action === 'cancel' ? harness.tasks.cancel(input.id, task.conversation_id) : input.action === 'retry' ? harness.tasks.retry(input.id) : harness.tasks.update(input.id, task.conversation_id, z.string().min(1).parse(input.instruction));
+      json(res, 200, { ok: true, result }); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/deliveries') {
+      const deliveries = store.db.prepare('SELECT id,conversation_id,scope,kind,file_name,status,error,created_at,updated_at FROM outbox ORDER BY created_at DESC LIMIT 200').all(); json(res, 200, { deliveries }); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/deliveries/retry') {
+      if (!harness) throw new Error('机器人运行时尚未启动');
+      const input = z.object({ id, conversationId: id }).parse(await body(req)); await harness.reply.retry(input.conversationId, input.id); json(res, 200, { ok: true }); return;
+    }
+    json(res, 404, { error: '接口不存在' });
+  } catch (error) { json(res, 400, { error: error instanceof Error ? error.message : '请求无效' }); }
 }

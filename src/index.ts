@@ -1,4 +1,7 @@
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import QRCode from 'qrcode';
 import { initConfig } from './config/settings.js';
 import { doctor, type Check } from './startup/doctor.js';
@@ -6,12 +9,12 @@ import { Store } from './storage/store.js';
 import { Harness } from './agent/harness.js';
 import { beginQr, QQAdapter, savedCredentials } from './platform/qq/adapter.js';
 import { loadPlugins } from './tools/plugins.js';
-import { handlePersona } from './admin/api.js';
-import { adminPage } from './admin/page.js';
+import { handleAdmin, handlePersona } from './admin/api.js';
 
 interface Status { phase: 'checking' | 'waiting_qr' | 'connecting' | 'ready' | 'failed'; checks: Check[]; qqConnected: boolean; error?: string; qrUrl?: string }
 const status: Status = { phase: 'checking', checks: [], qqConnected: false };
 const port = Number(process.env.BOT_PORT ?? 8765);
+const adminDir = path.resolve(process.cwd(), 'assets/admin');
 initConfig();
 const store = new Store();
 let adapter: QQAdapter | undefined;
@@ -28,6 +31,9 @@ function refreshConnectionState(): void {
 }
 
 const server = http.createServer(async (req, res) => {
+  const restricted = process.env.BOT_CONTROL_INTERFACE;
+  const controlAddresses = restricted ? (os.networkInterfaces()[restricted] ?? []).map((entry) => entry.address) : [];
+  if (req.socket.localAddress && controlAddresses.includes(req.socket.localAddress)) { res.writeHead(403); res.end(); return; }
   const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
   res.setHeader('Cache-Control', 'no-store');
   if (pathname === '/healthz') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ alive: true, phase: status.phase })); return; }
@@ -35,9 +41,14 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/status') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ phase: status.phase, checks: status.checks, qqConnected: status.qqConnected, bound: Boolean(store.qqCredentials() || (process.env.QQBOT_APPID && process.env.QQBOT_SECRET)), error: status.error, hasQr: !!status.qrUrl })); return; }
   if (pathname === '/qr.svg' && status.qrUrl) { res.writeHead(200, { 'Content-Type': 'image/svg+xml' }); res.end(await QRCode.toString(status.qrUrl, { type: 'svg', margin: 2 })); return; }
   if (pathname === '/api/persona') { await handlePersona(req, res, store); return; }
+  if (pathname.startsWith('/api/')) { await handleAdmin(req, res, store, harness); return; }
+  if (pathname === '/admin.js' || pathname === '/admin.css') {
+    res.writeHead(200, { 'Content-Type': pathname.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8', 'X-Content-Type-Options': 'nosniff' });
+    res.end(fs.readFileSync(path.join(adminDir, path.basename(pathname)))); return;
+  }
   if (pathname === '/') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(adminPage); return;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'", 'X-Content-Type-Options': 'nosniff' });
+    res.end(fs.readFileSync(path.join(adminDir, 'index.html'))); return;
   }
   res.writeHead(404); res.end();
 });

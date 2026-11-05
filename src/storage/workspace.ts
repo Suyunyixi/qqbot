@@ -24,8 +24,8 @@ export function virtualWorkspacePath(conversationId: string, input: string): str
   return input;
 }
 
-/** Resolve symlinks and reject files outside the current conversation. */
-export function resolveWorkspaceFile(conversationId: string, file: string): string {
+/** Resolve symlinks and reject entries outside the current conversation. */
+export function resolveWorkspaceEntry(conversationId: string, file: string): string {
   const root = fs.realpathSync(workspaceFor(conversationId));
   // Deep Agents' filesystem is virtual: /foo and relative foo both name a
   // file inside this conversation's root. Accept the actual mapped path too.
@@ -48,6 +48,11 @@ export function resolveWorkspaceFile(conversationId: string, file: string): stri
     if (relative.startsWith('..') || path.isAbsolute(relative)) throw error;
     try { actual = fs.realpathSync(legacy); } catch { throw error; }
   }
-  if (!actual.startsWith(root + path.sep) || !fs.statSync(actual).isFile()) throw new Error('只能访问当前会话工作目录中的文件');
+  if (actual !== root && !actual.startsWith(root + path.sep)) throw new Error('只能访问当前会话工作目录中的文件');
+  return actual;
+}
+export function resolveWorkspaceFile(conversationId: string, file: string): string {
+  const actual = resolveWorkspaceEntry(conversationId, file);
+  if (!fs.statSync(actual).isFile()) throw new Error('只能访问当前会话工作目录中的文件');
   return actual;
 }

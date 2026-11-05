@@ -41,7 +41,9 @@ export class QQAdapter implements Sender {
   readonly bot: QQBot;
   connected = false;
   constructor(credentials: QrConnectCredentials, private readonly store: Store, private readonly onState: (connected: boolean) => void) {
-    this.bot = new QQBot({ appId: credentials.appId, appSecret: credentials.appSecret, logger: console });
+    // SDK debug output contains complete inbound events and outgoing messages.
+    // Keep operational errors without duplicating private chats or tokens in Docker logs.
+    this.bot = new QQBot({ appId: credentials.appId, appSecret: credentials.appSecret, logger: { info: console.info, warn: console.warn, error: console.error } });
     this.bot.on('ready', () => { this.connected = true; this.onState(true); console.log('QQ 已连接'); });
     this.bot.on('resumed', () => { this.connected = true; this.onState(true); });
     this.bot.on('disconnected', () => { this.connected = false; this.onState(false); });
@@ -74,7 +76,9 @@ export class QQAdapter implements Sender {
     if (!candidate && !readConfig().delivery.proactive) throw new Error('没有可用的 QQ 回复目标，主动发送已关闭');
     const target = { scope: item.scope, targetId: item.conversationId, msgId: candidate?.id };
     this.store.setOutboxTarget(item.id, candidate?.id);
-    if (item.kind === 'text') return this.bot.sendText(target, item.content);
+    // QQ does not render Markdown sent as msg_type=0. Match dsh-qqbot and
+    // explicitly send msg_type=2 with markdown.content for both chat scopes.
+    if (item.kind === 'text') return this.bot.sendMarkdown(target, item.content);
     if (item.kind === 'card') return this.bot.send({ target, msgType: 3, content: ' ', ark: buildNativeArk(JSON.parse(item.content)) });
     const source = { localPath: item.content };
     const response = item.kind === 'image' ? await this.bot.sendImage(target, source) : item.kind === 'voice' ? await this.bot.sendVoice(target, { buffer: await qqVoiceBuffer(item.content) }) : item.kind === 'video' ? await this.bot.sendVideo(target, source) : await this.bot.sendFile(target, source, { fileName: item.fileName });

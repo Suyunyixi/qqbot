@@ -28,6 +28,7 @@ services:
       BOT_CHECKPOINT_PATH: ${BOT_CHECKPOINT_PATH:-/data/checkpoints.sqlite}
       BOT_WORKSPACE_DIR: /workspace
       BOT_HOST: 0.0.0.0
+      BOT_CONTROL_INTERFACE: eth1
       BOT_MODEL_ENV_PATH: /run/config/model.env
       PYTHON_RUNNER_URL: http://python-runner:8766
       BOT_CONFIG_PATH: /app/config/config.yaml
@@ -39,8 +40,10 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
       TZ: Asia/Shanghai
     networks:
-      - default
-      - runner-control
+      default:
+        interface_name: eth0
+      runner-control:
+        interface_name: eth1
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8765/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -57,15 +60,22 @@ services:
     read_only: true
     cap_drop:
       - ALL
+    cap_add:
+      - NET_ADMIN
+      - SETUID
+      - SETGID
     security_opt:
       - no-new-privileges:true
     pids_limit: 64
     mem_limit: 768m
     cpus: 1.0
+    environment:
+      BOT_WEB_PORT: ${BOT_WEB_PORT:-8765}
     tmpfs:
-      - /tmp:rw,nosuid,nodev,size=256m,mode=1777
+      - /tmp:rw,nosuid,nodev,size=1g,mode=1777
     networks:
       - runner-control
+      - runner-egress
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/healthz',timeout=3).read()"]
       interval: 10s
@@ -90,3 +100,4 @@ services:
 networks:
   runner-control:
     internal: true
+  runner-egress:

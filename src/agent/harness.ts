@@ -1,4 +1,5 @@
 import { readConfig } from '../config/settings.js';
+import { effectiveTrigger, groupSettings } from '../config/group.js';
 import { AgentRuntime } from './runtime.js';
 import { ReplyRuntime } from '../delivery/reply.js';
 import { Store, type TaskRow } from '../storage/store.js';
@@ -22,8 +23,10 @@ export class Harness {
     if (!this.store.record(event)) return false;
     // This fast gate is part of the Harness, before the Deep Agent graph. It
     // protects the zero-model guarantee even when another run holds the thread.
-    if (!shouldRespond(event, readConfig())) return false;
-    void this.schedule(event.conversationId, () => this.agent.respond({ conversationId: event.conversationId, scope: event.scope, replyTo: event.id, store: this.store, reply: this.reply, tasks: this.tasks, background: false }, event)).catch(async (err: unknown) => {
+    if (event.scope === 'group' && !groupSettings(this.store, event.conversationId).enabled) return false;
+    if (!shouldRespond(event, effectiveTrigger(this.store, event.scope, event.conversationId))) return false;
+    const owner = this.store.memory.isOwner(event.scope, event.conversationId, event.senderId);
+    void this.schedule(event.conversationId, () => this.agent.respond({ conversationId: event.conversationId, scope: event.scope, replyTo: event.id, store: this.store, reply: this.reply, tasks: this.tasks, background: false, owner }, event)).catch(async (err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       console.error('聊天回合失败：', message);
       try { await this.reply.send(event.conversationId, event.scope, event.id, 'text', '抱歉，这次处理失败了，请稍后重试。'); }

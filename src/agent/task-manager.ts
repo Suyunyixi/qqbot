@@ -24,6 +24,12 @@ export class TaskManager {
     this.store.setTask(id, 'cancelled');
     return '已取消任务';
   }
+  retry(id: string): string {
+    const task = this.store.task(id);
+    if (!task) throw new Error('找不到任务');
+    if (!['failed', 'interrupted', 'cancelled'].includes(task.status)) throw new Error('只有失败、中断或取消的任务可以重新执行');
+    return this.enqueue(task.conversation_id, task.scope, task.reply_to ?? undefined, task.instruction);
+  }
   update(id: string, conversationId: string, instruction: string): string {
     const task = this.store.task(id);
     if (!task || task.conversation_id !== conversationId) throw new Error('找不到该会话的任务');

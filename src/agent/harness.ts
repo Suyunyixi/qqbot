@@ -8,6 +8,17 @@ import { shouldRespond } from './trigger.js';
 import { isCommunityScope, type InboundEvent, type Sender } from '../domain/types.js';
 import { createHash } from 'node:crypto';
 
+export function replyForChatError(error: unknown): string {
+  const status=typeof error==='object' && error!==null && 'status' in error ? Number(error.status) : undefined;
+  const message=error instanceof Error ? error.message : String(error);
+  if (status===402 || /\b402\b/.test(message)) {
+    return /insufficient.balance|insufficient.quota|余额不足|额度不足/i.test(message)
+      ? '模型服务余额或额度不足，暂时无法回复，请联系管理员检查。'
+      : '模型服务返回计费错误，暂时无法回复，请联系管理员检查。';
+  }
+  return '抱歉，这次处理失败了，请稍后重试。';
+}
+
 export class Harness {
   readonly reply: ReplyRuntime;
   readonly tasks: TaskManager;
@@ -32,7 +43,7 @@ export class Harness {
     }).catch(async (err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       console.error('聊天回合失败：', message);
-      try { await this.reply.send(event.conversationId, event.scope, event.id, 'text', '抱歉，这次处理失败了，请稍后重试。'); }
+      try { await this.reply.send(event.conversationId, event.scope, event.id, 'text', replyForChatError(err)); }
       catch (sendError) { console.error('错误提示发送失败：', sendError instanceof Error ? sendError.message : sendError); }
     });
     return true;

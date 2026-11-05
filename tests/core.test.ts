@@ -332,6 +332,11 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
           return;
         }
         const allText = JSON.stringify(parsed.messages);
+        if (allText.includes('模型余额错误测试')) {
+          res.writeHead(402,{'Content-Type':'application/json'});
+          res.end(JSON.stringify({error:{message:'Insufficient Balance',type:'insufficient_balance_error',code:'invalid_request_error'}}));
+          return;
+        }
         if (allText.includes('群聊答复语义复核器')) {
           if (allText.includes('复核期间插话测试')) {
             releaseReview=()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({id:'held-review',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:JSON.stringify({needsRevision:false,reason:''})},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}))};
@@ -459,6 +464,15 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(system).toContain('持续生效的核心人格');expect(system).not.toContain('负责存储设备');expect(user).toContain('负责存储设备');
     harness.stop(); store.close();
   }, 20000);
+  it('模型返回余额不足时保留原始消息并向群里说明', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
+    const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'balance-error'}}});
+    await harness.receive(event({id:'balance-fail',conversationId:'group-balance',content:'模型余额错误测试',isMention:true}));
+    await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+    expect(delivered[0]?.content).toContain('余额或额度不足');
+    expect(store.recent('group-balance',10).some((row)=>row.content==='模型余额错误测试')).toBe(true);
+    harness.stop();store.close();
+  },20000);
   it('前台工具循环在递归上限之前停止并说明情况', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
     const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'loop-response'}}});

@@ -26,7 +26,10 @@ export class Harness {
     if (isCommunityScope(event.scope) && !groupSettings(this.store, event.conversationId).enabled) return false;
     if (!shouldRespond(event, effectiveTrigger(this.store, event.scope, event.conversationId))) return false;
     const owner = this.store.memory.isOwner(event.scope, event.conversationId, event.senderId);
-    void this.schedule(event.conversationId, () => this.agent.respond({ conversationId: event.conversationId, scope: event.scope, replyTo: event.id, actorId:event.senderId, store: this.store, reply: this.reply, tasks: this.tasks, background: false, owner, qqApi:this.sender.qqApi?.bind(this.sender) }, event)).catch(async (err: unknown) => {
+    void this.schedule(event.conversationId, async () => {
+      await this.agent.respond({ conversationId: event.conversationId, scope: event.scope, replyTo: event.id, actorId:event.senderId, store: this.store, reply: this.reply, tasks: this.tasks, background: false, owner, qqApi:this.sender.qqApi?.bind(this.sender) }, event);
+      this.agent.scheduleMemory(event.conversationId, this.store.eventSeq(event.conversationId, event.id));
+    }).catch(async (err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       console.error('聊天回合失败：', message);
       try { await this.reply.send(event.conversationId, event.scope, event.id, 'text', '抱歉，这次处理失败了，请稍后重试。'); }

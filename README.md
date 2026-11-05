@@ -1,6 +1,6 @@
 # QQ Harness Bot
 
-个人 QQ 聊天机器人：腾讯官方 Node SDK、LangChain.js、LangGraph.js、Deep Agents.js 和 SQLite。QQ群消息先保存原文，只有 @机器人或命中关键词才调用模型；耗时工作交给后台子 Agent，支持回调和分段交付。
+个人 QQ 聊天机器人：腾讯官方 Node SDK、LangChain.js、LangGraph.js、Deep Agents.js 和 SQLite。QQ群消息先保存原文，默认只有 @机器人时才调用模型，也可自行配置触发关键词；耗时工作交给后台子 Agent，支持回调和分段交付。
 
 ## 一键启动
 

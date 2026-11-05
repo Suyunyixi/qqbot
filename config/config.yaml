@@ -1,6 +1,5 @@
 trigger:
-  keywords:
-    - 小助手
+  keywords: []
   directMessages: true
 model:
   provider: openai
@@ -10,7 +9,7 @@ model:
   vision: true
   contextTokens: 65536
 memory:
-  recentMessages: 60
+  recentMessages: 25
   summarizeAfter: 80
 tools:
   search: true

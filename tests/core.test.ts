@@ -28,6 +28,8 @@ const { pcmToSilk, loadSilkWasm } = await import('@tencent-connect/qqbot-nodejs/
 const { savedCredentials, QQAdapter } = await import('../src/platform/qq/adapter.js');
 const { makeModel } = await import('../src/models/factory.js');
 const { filesystemRules } = await import('../src/tools/sandbox.js');
+const { liveContext, recheckBeforeReply } = await import('../src/agent/live-context.js');
+const { requestedRecipient, mentionRecipient } = await import('../src/agent/addressing.js');
 import type { DeliveryItem, InboundEvent } from '../src/domain/types.js';
 
 function event(overrides: Partial<InboundEvent> = {}): InboundEvent {
@@ -69,6 +71,29 @@ describe('沙箱与动态配置', () => {
 });
 
 describe('消息记录与触发', () => {
+  it('发送前重新检查处理中收到的群友答复，静默消息本身不会唤醒模型', async () => {
+    const store = new Store(':memory:');
+    store.record(event({ id: 'trigger', isMention: true }));
+    const live = liveContext(store, 'group', 'group-a', readConfig(), store.eventSeq('group-a', 'trigger'));
+    store.record(event({ id: 'late', senderId: 'ez', senderName: 'EZ', content: '有两处要调整' }));
+    const resume = vi.fn(async (message: { content: unknown }) => `采纳：${String(message.content)}`);
+    const result = await recheckBeforeReply('旧答案', live.takePending, resume);
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(result).toContain('EZ [ez]');
+    expect(result).toContain('有两处要调整');
+    store.close();
+  });
+  it('请求询问已知群友时生成真实 @，对方已答复或身份有歧义时不重复 @', () => {
+    const store = new Store(':memory:');
+    store.record(event({ id: 'ez', senderId: 'platform-openid', senderName: 'EZ' }));
+    const aliases = store.memory.listIdentities();
+    const target = requestedRecipient('问下ez这个还对不对', 'user-a', aliases);
+    expect(mentionRecipient('EZ 你瞅一眼，这里对吗？', target, false)).toBe('<@platform-openid> EZ 你瞅一眼，这里对吗？');
+    expect(mentionRecipient('EZ 已经回答了。', target, true)).toBe('EZ 已经回答了。');
+    store.record(event({ id: 'ez2', senderId: 'another-openid', senderName: 'EZ' }));
+    expect(requestedRecipient('问下ez这个还对不对', 'user-a', store.memory.listIdentities())).toBeUndefined();
+    store.close();
+  });
   it('QQ 绑定凭据保存在数据库中，重新打开后无需重新扫码', () => {
     const dbFile = path.join(root, 'qq-binding-test.sqlite');
     const initial = new Store(dbFile);
@@ -101,7 +126,8 @@ describe('消息记录与触发', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(send).not.toHaveBeenCalled();
     expect(shouldRespond(event({ isMention: true }), readConfig())).toBe(true);
-    expect(shouldRespond(event({ content: '小助手在吗' }), readConfig())).toBe(true);
+    expect(shouldRespond(event({ content: '小助手在吗' }), readConfig())).toBe(false);
+    expect(shouldRespond(event({ content: '小助手在吗' }), { ...readConfig(), trigger: { ...readConfig().trigger, keywords: ['小助手'] } })).toBe(true);
     fetchSpy.mockRestore(); harness.stop(); store.close();
   });
   it('QQ 接入层可以独立接收并记录静默群消息，不依赖模型', async () => {
@@ -278,6 +304,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
   let fileToSend = '';
   let releaseInterjection: (() => void) | undefined;
   let releaseRecovery: (() => void) | undefined;
+  let releaseSummary: (() => void) | undefined;
   let resumeRecovery = false;
   const requests: Array<Record<string, unknown>> = [];
   beforeAll(async () => {
@@ -292,6 +319,10 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
           return;
         }
         const allText = JSON.stringify(parsed.messages);
+        if (allText.includes('累计群聊摘要') && allText.includes('项目讨论 0')) {
+          releaseSummary = () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ id:'summary',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:JSON.stringify({summary:'群友曾谈论长期项目',memories:[]})},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2} })); };
+          return;
+        }
         if (allText.includes('插话整合测试') && !allText.includes('关键补充')) {
           releaseInterjection = () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ id:'held',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:'旧答案'},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2} })); };
           return;
@@ -410,7 +441,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(requests.length).toBe(before+2);
     harness.stop();store.close();
   },20000);
-  it('积累大量静默消息后，触发时先生成摘要并保留全部原文', async () => {
+  it('积累静默消息后先回复，后台整理摘要并保留全部原文', async () => {
     const store = new Store(':memory:');
     const delivered: DeliveryItem[] = [];
     const harness = new Harness(store, { send: async (item) => { delivered.push(item); return { id: 'qq-1' }; } });
@@ -420,10 +451,30 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     await harness.receive(event({ id: 'long-trigger', conversationId: 'group-long', isMention: true, content: '回顾一下项目' }));
     await vi.waitFor(() => expect(delivered.length).toBe(1), { timeout: 15000 });
     expect(store.recent('group-long', 200).filter((row) => row.direction === 'in')).toHaveLength(86);
+    await vi.waitFor(() => expect(releaseSummary).toBeDefined(), { timeout: 15000 });
+    expect(store.summary('group-long')).toBeUndefined();
+    releaseSummary!();
+    await vi.waitFor(() => expect(store.summary('group-long')?.summary).toContain('长期项目'), { timeout: 15000 });
     expect(store.summary('group-long')?.summary).toContain('长期项目');
-    expect(JSON.stringify(requests.at(-1)?.messages)).toContain('长期项目');
     harness.stop(); store.close();
   }, 20000);
+  it('同一群重复触发不会累积旧检查点消息，原始聊天仍保留', async () => {
+    const { SqliteSaver } = await import('@langchain/langgraph-checkpoint-sqlite');
+    const { checkpointPath } = await import('../src/config/settings.js');
+    const store = new Store(':memory:'); const delivered: DeliveryItem[] = [];
+    const harness = new Harness(store, { send: async (item) => { delivered.push(item); return { id: `qq-checkpoint-${delivered.length}` }; } });
+    for (let i = 0; i < 3; i++) {
+      await harness.receive(event({ id: `turn-${i}`, conversationId: 'group-compact', content: `普通对话 ${i}`, isMention: true }));
+      await vi.waitFor(() => expect(delivered.length).toBe(i + 1), { timeout: 15000 });
+    }
+    const saver = SqliteSaver.fromConnString(checkpointPath);
+    const checkpoint = await saver.getTuple({ configurable: { thread_id: 'group:group-compact' } });
+    const messages = checkpoint?.checkpoint.channel_values.messages as unknown[];
+    expect(messages.length).toBeLessThanOrEqual(3);
+    expect(store.recent('group-compact', 20).filter((row) => row.direction === 'in')).toHaveLength(3);
+    expect(JSON.stringify(requests.at(-1)?.messages)).toContain('普通对话 0');
+    harness.stop(); store.close();
+  }, 30000);
   it('Agent 调用文件工具后，再发送说明文字', async () => {
     const store = new Store(':memory:');
     const delivered: DeliveryItem[] = [];

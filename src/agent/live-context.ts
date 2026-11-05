@@ -4,6 +4,17 @@ import { isCommunityScope, type Scope } from '../domain/types.js';
 import type { Store, MessageRow } from '../storage/store.js';
 import type { AppConfig } from '../config/settings.js';
 
+/** Catch messages arriving after the graph's final middleware check. */
+export async function recheckBeforeReply<T>(initial: T, takePending: () => HumanMessage | undefined, resume: (message: HumanMessage) => Promise<T>): Promise<T> {
+  let result = initial;
+  for (let i = 0; i < 2; i++) {
+    const addition = takePending();
+    if (!addition) break;
+    result = await resume(addition);
+  }
+  return result;
+}
+
 /** Fold silent group interjections into an already-triggered turn, without waking on them. */
 export function liveContext(store: Store, scope: Scope, conversationId: string, config: AppConfig, startSeq: number) {
   let cursor = startSeq; let finalRechecks = 0;
@@ -34,5 +45,5 @@ export function liveContext(store: Store, scope: Scope, conversationId: string, 
       return handler(request);
     },
   });
-  return { middleware, hasPending };
+  return { middleware, hasPending, takePending: pull };
 }

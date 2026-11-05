@@ -51,6 +51,10 @@ export class Store {
         id INTEGER PRIMARY KEY CHECK (id = 1), app_id TEXT NOT NULL, app_secret TEXT NOT NULL,
         user_openid TEXT, updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS qq_events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL,
+        payload TEXT NOT NULL, received_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, scope TEXT NOT NULL, reply_to TEXT,
         instruction TEXT NOT NULL, status TEXT NOT NULL, result TEXT, error TEXT,
@@ -70,6 +74,8 @@ export class Store {
         platform_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
     `);
+    const taskColumns=this.db.prepare('PRAGMA table_info(tasks)').all() as Array<{name:string}>;
+    if(!taskColumns.some((column)=>column.name==='actor_id'))this.db.exec('ALTER TABLE tasks ADD COLUMN actor_id TEXT');
     this.memory = new MemoryRepository(this.db);
     this.memory.bootstrapOwner(this.qqCredentials()?.userOpenid);
   }
@@ -81,6 +87,10 @@ export class Store {
     if (!value.appId || !value.appSecret) throw new Error('QQ 凭据不完整');
     this.db.prepare('INSERT INTO qq_credentials VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET app_id=excluded.app_id,app_secret=excluded.app_secret,user_openid=excluded.user_openid,updated_at=excluded.updated_at').run(value.appId, value.appSecret, value.userOpenid ?? null, new Date().toISOString());
     this.memory.bootstrapOwner(value.userOpenid);
+  }
+  recordPlatformEvent(type:string,value:unknown):void {
+    const payload=JSON.stringify(value ?? null);
+    this.db.prepare('INSERT INTO qq_events(event_type,payload,received_at) VALUES (?,?,?)').run(type,payload,new Date().toISOString());
   }
   record(event: InboundEvent): boolean {
     return this.db.transaction(() => {
@@ -96,7 +106,7 @@ export class Store {
       try { const value = JSON.parse(item.content) as { title?: unknown }; if (typeof value.title === 'string') cardTitle = value.title; } catch { /* Do not turn a successful send into a retry. */ }
     }
     this.db.prepare(`INSERT OR IGNORE INTO messages (id,conversation_id,scope,sender_id,sender_name,content,timestamp,direction,attachments) VALUES (?,?,?,?,?,?,?,'out',?)`)
-      .run(platformId ?? `sent:${item.id}`, item.conversationId, item.scope, 'bot', '机器人', item.kind === 'text' ? item.content : item.kind === 'card' ? `[card] ${cardTitle}` : `[${item.kind}] ${item.fileName ?? path.basename(item.content)}`, new Date().toISOString(), '[]');
+      .run(platformId ?? `sent:${item.id}`, item.conversationId, item.scope, 'bot', '机器人', item.kind === 'text' ? item.content : item.kind === 'card' ? `[card] ${cardTitle}` : item.kind === 'keyboard' ? '[keyboard] 交互按钮' : item.kind === 'embed' ? '[embed] 频道卡片' : `[${item.kind}] ${item.fileName ?? path.basename(item.content)}`, new Date().toISOString(), '[]');
   }
   recent(conversationId: string, limit: number, through = Number.MAX_SAFE_INTEGER): MessageRow[] {
     return (this.db.prepare('SELECT * FROM messages WHERE conversation_id = ? AND seq <= ? ORDER BY seq DESC LIMIT ?').all(conversationId, through, limit) as MessageRow[]).reverse();
@@ -136,9 +146,9 @@ export class Store {
   setSummary(conversationId: string, summary: string, through: number): void {
     this.db.prepare('INSERT INTO summaries VALUES (?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET summary=excluded.summary,through_seq=excluded.through_seq,updated_at=excluded.updated_at WHERE excluded.through_seq > summaries.through_seq').run(conversationId, summary, through, new Date().toISOString());
   }
-  addTask(conversationId: string, scope: Scope, replyTo: string | undefined, instruction: string): string {
+  addTask(conversationId: string, scope: Scope, replyTo: string | undefined, instruction: string, actorId?:string): string {
     const id = randomUUID(); const now = new Date().toISOString();
-    this.db.prepare("INSERT INTO tasks(id,conversation_id,scope,reply_to,instruction,status,created_at,updated_at) VALUES (?,?,?,?,?,'queued',?,?)").run(id, conversationId, scope, replyTo ?? null, instruction, now, now);
+    this.db.prepare("INSERT INTO tasks(id,conversation_id,scope,reply_to,instruction,status,created_at,updated_at,actor_id) VALUES (?,?,?,?,?,'queued',?,?,?)").run(id, conversationId, scope, replyTo ?? null, instruction, now, now,actorId ?? null);
     return id;
   }
   task(id: string): TaskRow | undefined { return this.db.prepare('SELECT * FROM tasks WHERE id=?').get(id) as TaskRow | undefined; }
@@ -146,6 +156,7 @@ export class Store {
   pendingNotifications(): TaskRow[] { return this.db.prepare("SELECT * FROM tasks WHERE status IN ('waiting','completed','failed','interrupted') AND notified=0 ORDER BY updated_at").all() as TaskRow[]; }
   listTasks(conversationId: string): TaskRow[] { return this.db.prepare('SELECT * FROM tasks WHERE conversation_id=? ORDER BY created_at DESC LIMIT 20').all(conversationId) as TaskRow[]; }
   addTaskUpdate(id: string, content: string): void { this.db.prepare('INSERT INTO task_updates(task_id,content) VALUES (?,?)').run(id, content); }
+  setTaskInstruction(id:string,instruction:string):void { this.db.prepare('UPDATE tasks SET instruction=?,updated_at=? WHERE id=?').run(instruction,new Date().toISOString(),id); }
   addProgress(taskId: string, content: string): string { const id = randomUUID(); this.db.prepare('INSERT INTO task_progress(id,task_id,content,created_at) VALUES (?,?,?,?)').run(id, taskId, content, new Date().toISOString()); return id; }
   logTask(taskId: string, content: string): void { this.db.prepare('INSERT INTO task_progress(id,task_id,content,sent,created_at) VALUES (?,?,?,1,?)').run(randomUUID(), taskId, content.slice(0, 1000), new Date().toISOString()); }
   pendingProgress(): Array<{ id: string; task_id: string; content: string }> { return this.db.prepare("SELECT p.id,p.task_id,p.content FROM task_progress p JOIN tasks t ON t.id=p.task_id WHERE p.sent=0 AND t.status IN ('running','waiting') ORDER BY p.created_at").all() as Array<{ id: string; task_id: string; content: string }>; }
@@ -153,9 +164,22 @@ export class Store {
   takeTaskUpdates(id: string): string[] {
     return this.db.transaction(() => { const rows = this.db.prepare('SELECT content FROM task_updates WHERE task_id=? ORDER BY seq').all(id) as Array<{ content: string }>; this.db.prepare('DELETE FROM task_updates WHERE task_id=?').run(id); return rows.map((row) => row.content); })();
   }
+  prepareTaskContinuation(id:string,original:string,result:string):string | undefined {
+    return this.db.transaction(()=>{
+      const rows=this.db.prepare('SELECT content FROM task_updates WHERE task_id=? ORDER BY seq').all(id) as Array<{content:string}>;
+      if(!rows.length)return undefined;
+      const next=`原任务：${original}\n此前执行结果：${result}\n用户追加要求：${rows.map((row)=>row.content).join('\n')}`;
+      this.setTaskInstruction(id,next);
+      this.db.prepare('DELETE FROM task_updates WHERE task_id=?').run(id);
+      return next;
+    })();
+  }
   setTask(id: string, status: string, result?: string, error?: string): void { this.db.prepare("UPDATE tasks SET status=?,result=?,error=?,updated_at=?,notified=CASE WHEN ? IN ('waiting','completed','failed','interrupted') THEN 0 ELSE notified END WHERE id=?").run(status, result ?? null, error ?? null, new Date().toISOString(), status, id); }
   markNotified(id: string, status: string): void { this.db.prepare('UPDATE tasks SET notified=1 WHERE id=? AND status=?').run(id, status); }
   interruptRunning(): void { this.db.prepare("UPDATE tasks SET status='interrupted',error='程序重启中断了任务；可重新发起',updated_at=?,notified=0 WHERE status IN ('running','waiting')").run(new Date().toISOString()); }
+  recoverTasks(): void {
+    this.db.prepare("UPDATE tasks SET status='queued',error=NULL,updated_at=?,notified=0 WHERE status IN ('running','waiting') OR (status='interrupted' AND error='服务退出，等待自动恢复')").run(new Date().toISOString());
+  }
   addOutbox(item: DeliveryItem): void { const now = new Date().toISOString(); this.db.prepare("INSERT INTO outbox VALUES (?,?,?,?,?,?,?,'queued',NULL,NULL,?,?)").run(item.id,item.conversationId,item.scope,item.replyTo ?? null,item.kind,item.content,item.fileName ?? null,now,now); }
   outboxState(id: string): string | undefined { return (this.db.prepare('SELECT status FROM outbox WHERE id=?').get(id) as { status: string } | undefined)?.status; }
   pendingOutbox(conversationId: string): Array<{ id: string; scope: Scope; reply_to: string | null; kind: DeliveryItem['kind']; content: string; file_name: string | null; status: string; error: string | null }> {
@@ -167,4 +191,4 @@ export class Store {
   close(): void { this.db.close(); }
 }
 export interface MessageRow { seq: number; id: string; sender_id: string; sender_name: string | null; content: string; timestamp: string; direction: string; attachments: string }
-export interface TaskRow { id: string; conversation_id: string; scope: Scope; reply_to: string | null; instruction: string; status: string; result: string | null; error: string | null; notified: number }
+export interface TaskRow { id: string; conversation_id: string; scope: Scope; reply_to: string | null; instruction: string; status: string; result: string | null; error: string | null; notified: number; actor_id?:string|null }

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Scope } from '../domain/types.js';
+import { isCommunityScope, type Scope } from '../domain/types.js';
 import type { Store } from '../storage/store.js';
 import { readConfig } from './settings.js';
 
@@ -21,6 +21,6 @@ export function groupSettings(store: Store, conversationId: string): GroupSettin
 }
 export function effectiveTrigger(store: Store, scope: Scope, conversationId: string) {
   const config = readConfig();
-  if (scope === 'group') config.trigger.keywords = groupSettings(store, conversationId).keywords;
+  if (isCommunityScope(scope)) config.trigger.keywords = groupSettings(store, conversationId).keywords;
   return config;
 }

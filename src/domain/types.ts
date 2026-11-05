@@ -1,4 +1,5 @@
-export type Scope = 'group' | 'c2c';
+export type Scope = 'group' | 'c2c' | 'guild' | 'dm';
+export function isCommunityScope(scope:Scope):boolean { return scope==='group' || scope==='guild'; }
 
 export interface InboundEvent {
   id: string;
@@ -19,7 +20,7 @@ export interface ReplyTarget {
   msgId?: string;
 }
 
-export type DeliveryKind = 'text' | 'image' | 'voice' | 'video' | 'file' | 'card';
+export type DeliveryKind = 'text' | 'image' | 'voice' | 'video' | 'file' | 'card' | 'keyboard' | 'embed';
 export interface DeliveryItem {
   id: string;
   conversationId: string;
@@ -33,4 +34,5 @@ export interface DeliveryItem {
 export interface SendResult { id?: string; timestamp?: string | number }
 export interface Sender {
   send(item: DeliveryItem): Promise<SendResult>;
+  qqApi?(method:'GET'|'POST'|'PUT'|'PATCH'|'DELETE',path:string,body?:unknown):Promise<unknown>;
 }

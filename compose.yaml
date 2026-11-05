@@ -30,6 +30,7 @@ services:
       BOT_HOST: 0.0.0.0
       BOT_CONTROL_INTERFACE: eth1
       BOT_MODEL_ENV_PATH: /run/config/model.env
+      QQ_INTENTS: ${QQ_INTENTS:-}
       PYTHON_RUNNER_URL: http://python-runner:8766
       BOT_CONFIG_PATH: /app/config/config.yaml
       BOT_PERSONA_PATH: /app/config/persona.md

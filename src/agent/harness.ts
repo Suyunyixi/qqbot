@@ -5,7 +5,7 @@ import { ReplyRuntime } from '../delivery/reply.js';
 import { Store, type TaskRow } from '../storage/store.js';
 import { TaskManager } from './task-manager.js';
 import { shouldRespond } from './trigger.js';
-import type { InboundEvent, Sender } from '../domain/types.js';
+import { isCommunityScope, type InboundEvent, type Sender } from '../domain/types.js';
 import { createHash } from 'node:crypto';
 
 export class Harness {
@@ -13,20 +13,20 @@ export class Harness {
   readonly tasks: TaskManager;
   private readonly agent: AgentRuntime;
   private readonly queues = new Map<string, Promise<void>>();
-  constructor(readonly store: Store, sender: Sender) {
+  constructor(readonly store: Store, private readonly sender: Sender) {
     this.reply = new ReplyRuntime(store, sender);
     this.agent = new AgentRuntime(store);
-    this.tasks = new TaskManager(store, (task, signal) => this.agent.runBackground({ conversationId: task.conversation_id, scope: task.scope, replyTo: task.reply_to ?? undefined, store, reply: this.reply, tasks: this.tasks, background: true, taskId: task.id }, task, signal), (task) => this.callback(task));
+    this.tasks = new TaskManager(store, (task, signal) => this.agent.runBackground({ conversationId: task.conversation_id, scope: task.scope, replyTo: task.reply_to ?? undefined, store, reply: this.reply, tasks: this.tasks, background: true, taskId: task.id,owner:!!task.actor_id && store.memory.isOwner(task.scope,task.conversation_id,task.actor_id),qqApi:this.sender.qqApi?.bind(this.sender) }, task, signal), (task) => this.callback(task));
   }
   start(): void { this.store.recoverSending(); this.tasks.start(); }
   async receive(event: InboundEvent): Promise<boolean> {
     if (!this.store.record(event)) return false;
     // This fast gate is part of the Harness, before the Deep Agent graph. It
     // protects the zero-model guarantee even when another run holds the thread.
-    if (event.scope === 'group' && !groupSettings(this.store, event.conversationId).enabled) return false;
+    if (isCommunityScope(event.scope) && !groupSettings(this.store, event.conversationId).enabled) return false;
     if (!shouldRespond(event, effectiveTrigger(this.store, event.scope, event.conversationId))) return false;
     const owner = this.store.memory.isOwner(event.scope, event.conversationId, event.senderId);
-    void this.schedule(event.conversationId, () => this.agent.respond({ conversationId: event.conversationId, scope: event.scope, replyTo: event.id, store: this.store, reply: this.reply, tasks: this.tasks, background: false, owner }, event)).catch(async (err: unknown) => {
+    void this.schedule(event.conversationId, () => this.agent.respond({ conversationId: event.conversationId, scope: event.scope, replyTo: event.id, actorId:event.senderId, store: this.store, reply: this.reply, tasks: this.tasks, background: false, owner, qqApi:this.sender.qqApi?.bind(this.sender) }, event)).catch(async (err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       console.error('聊天回合失败：', message);
       try { await this.reply.send(event.conversationId, event.scope, event.id, 'text', '抱歉，这次处理失败了，请稍后重试。'); }

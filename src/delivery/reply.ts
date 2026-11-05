@@ -35,7 +35,7 @@ export class ReplyRuntime {
   }
 
   async send(conversationId: string, scope: Scope, replyTo: string | undefined, kind: DeliveryKind, content: string, fileName?: string, deliveryKey?: string): Promise<void> {
-    if (kind !== 'text' && kind !== 'card') {
+    if (kind !== 'text' && kind !== 'card' && kind !== 'keyboard' && kind !== 'embed') {
       content = resolveWorkspaceFile(conversationId, content);
     }
     const previous = this.queues.get(conversationId) ?? Promise.resolve();

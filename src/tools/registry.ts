@@ -9,7 +9,7 @@ import { runProcess } from './process.js';
 import { Store } from '../storage/store.js';
 import { ReplyRuntime } from '../delivery/reply.js';
 import { TaskManager } from '../agent/task-manager.js';
-import type { DeliveryKind, Scope } from '../domain/types.js';
+import { isCommunityScope, type DeliveryKind, type Scope } from '../domain/types.js';
 import { downloadPublicFile, readPublicWebpage, validateUrl } from './web.js';
 import { getMaxUploadSize, MediaFileType } from '@tencent-connect/qqbot-nodejs';
 import { researchWeb, searchWeb } from './search.js';
@@ -36,7 +36,10 @@ export interface ToolContext {
   sentText?: boolean;
   owner?: boolean;
   hasPendingContext?: () => boolean;
+  qqApi?: SenderApi;
+  actorId?: string;
 }
+type SenderApi = (method:'GET'|'POST'|'PUT'|'PATCH'|'DELETE',path:string,body?:unknown)=>Promise<unknown>;
 const safeFile = resolveWorkspaceFile;
 function wrap<T>(fn: (value: T) => Promise<unknown>): (value: T) => Promise<string> {
   return async (value) => {
@@ -84,6 +87,17 @@ export function makeTools(ctx: ToolContext) {
   ];
   // Both the main agent and a delegated worker use the same ordered delivery path.
   tools.push(
+    tool(wrap(async (embed:{title:string;prompt:string;thumbnail?:{url:string};fields:Array<{name:string}>})=>{
+      if(ctx.scope!=='guild' && ctx.scope!=='dm')throw new Error('QQ Embed 当前仅支持频道和频道私信');
+      if(ctx.hasPendingContext?.())throw new Error('群聊出现新的插话，请先结合最新群消息');
+      const payload=JSON.stringify(embed);const key=ctx.taskId?`task:${ctx.taskId}:embed:${createHash('sha256').update(payload).digest('hex')}`:undefined;
+      await ctx.reply.send(ctx.conversationId,ctx.scope,ctx.replyTo,'embed',payload,undefined,key);return {sent:true};
+    }),{name:'send_embed',description:'向 QQ 文字子频道或频道私信发送官方 Embed 卡片；群聊和普通私聊不支持。',schema:z.object({title:z.string().min(1).max(200),prompt:z.string().max(200),thumbnail:z.object({url:z.string().url()}).optional(),fields:z.array(z.object({name:z.string().max(200)})).max(10)})}),
+    tool(wrap(async ({text,buttons}:{text:string;buttons:Array<{label:string;data:string}>})=>{
+      if(ctx.hasPendingContext?.())throw new Error('群聊出现新的插话，请先结合最新群消息');
+      const payload=JSON.stringify({text,buttons});const key=ctx.taskId?`task:${ctx.taskId}:keyboard:${createHash('sha256').update(payload).digest('hex')}`:undefined;
+      await ctx.reply.send(ctx.conversationId,ctx.scope,ctx.replyTo,'keyboard',payload,undefined,key);return {sent:true};
+    }),{name:'send_keyboard',description:'发送 QQ 原生交互按钮；用户点击后会作为当前会话中的回复交给你处理。按钮可用于选择，受 QQ 平台权限和客户端支持限制。',schema:z.object({text:z.string().min(1).max(1000),buttons:z.array(z.object({label:z.string().min(1).max(30),data:z.string().min(1).max(200)})).min(1).max(5)})}),
     tool(wrap(async ({ script, inputs, timeoutSeconds, outputs }: { script: string; inputs: string[]; timeoutSeconds: number; outputs?: string[] }) => {
       if (!ctx.background && timeoutSeconds > 20) throw new Error('超过 20 秒的脚本请交给后台任务');
       return runPythonScript(ctx.conversationId, script, inputs, timeoutSeconds, ctx.signal, outputs);
@@ -100,7 +114,7 @@ export function makeTools(ctx: ToolContext) {
       const key = ctx.taskId ? `task:${ctx.taskId}:card:${createHash('sha256').update(payload).digest('hex')}` : undefined;
       await ctx.reply.send(ctx.conversationId, ctx.scope, ctx.replyTo, 'card', payload, undefined, key);
       return { sent: true, kind: 'qq_ark_card' };
-    }), { name: 'send_native_card', description: '发送 QQ 原生 ARK 卡片。用户说“卡片”时默认使用此工具；单条链接用 link，多条榜单用 list。链接必须是真实来源，禁止猜造；受 QQ 卡片权限和 URL 白名单限制，失败必须如实说明。', schema: nativeCardSchema }),
+    }), { name: 'send_native_card', description: '发送 QQ 原生 ARK 卡片。单条链接 link，多条榜单 list，大图链接 cover；已获授权的其他模板可使用 custom 并提供模板 ID 和字段。链接必须是真实来源；平台拒绝时如实说明。', schema: nativeCardSchema }),
     tool(wrap(async ({ text }: { text: string }) => {
       if (ctx.hasPendingContext?.()) throw new Error('群聊出现新的插话，请先结合最新群消息再回复');
       const key = ctx.taskId ? `task:${ctx.taskId}:${ctx.notificationKey ?? (ctx.background ? 'worker' : 'callback')}:text:${createHash('sha256').update(text).digest('hex')}` : undefined;
@@ -122,10 +136,19 @@ export function makeTools(ctx: ToolContext) {
       return { sent: true, file: path.basename(actual), kind };
     }), { name: 'send_media', description: '立即向当前会话发送本会话工作目录的文件、图片或视频；成功后才能说已发送。', schema: z.object({ file: z.string(), kind: config.tools.voice ? z.enum(['image', 'voice', 'video', 'file']) : z.enum(['image', 'video', 'file']) }) }),
   );
+  if(ctx.owner && ctx.qqApi) tools.push(tool(wrap(async ({method,path,body}:{method:'GET'|'POST'|'PUT'|'PATCH'|'DELETE';path:string;body?:unknown})=>ctx.qqApi!(method,path,body)),{name:'owner_qq_api',description:'创建者专用：在创建者明确要求时调用 QQ 官方开放平台 REST 接口。先查阅官方文档确认路径、参数和权限；返回真实 API 结果。不要尝试获取密钥或访问非 QQ 主机。',schema:z.object({method:z.enum(['GET','POST','PUT','PATCH','DELETE']),path:z.string().min(1).max(1000),body:z.unknown().optional()})}));
   if (!ctx.background) {
+    if(ctx.actorId)tools.push(tool(wrap(async ({type,content}:{type:'self'|'group';content:string})=>{
+      const user=ctx.store.memory.lookup(ctx.scope,ctx.conversationId,ctx.actorId!);
+      if(!user)throw new Error('当前用户身份未识别');
+      if(type==='group' && !isCommunityScope(ctx.scope))throw new Error('当前会话不是群聊或频道');
+      const subject=type==='self'?user:ctx.conversationId;
+      const id=ctx.store.memory.add(type==='self'?'user':'group',subject,content,ctx.conversationId);
+      return {id,type,saved:true};
+    }),{name:'remember_fact',description:'当前说话人明确要求记住时使用：self 保存该用户自己的长期事实，group 保存当前群或频道的共同约定。不得替其他人编造事实，普通用户不能以此授予自己创建者权限。',schema:z.object({type:z.enum(['self','group']),content:z.string().min(1).max(2000)})}));
     if (ctx.owner) {
       tools.push(tool(wrap(async ({ value }: { value: string }) => { ctx.store.setAppSetting('persona', value); return { saved: true, effective: 'next turn' }; }), { name: 'owner_set_persona', description: '创建者专用：只有创建者明确要求修改主人格时才使用；保存后下一回合生效。', schema: z.object({ value: z.string().min(1).max(30000) }) }));
-      if (ctx.scope === 'group') tools.push(tool(wrap(async ({ persona, keywords, enabled }: { persona?: string; keywords?: string[]; enabled?: boolean }) => {
+      if (isCommunityScope(ctx.scope)) tools.push(tool(wrap(async ({ persona, keywords, enabled }: { persona?: string; keywords?: string[]; enabled?: boolean }) => {
         const existing = groupSettings(ctx.store, ctx.conversationId);
         const updated = groupSettingsSchema.parse({ ...existing, ...(persona === undefined ? {} : { persona }), ...(keywords === undefined ? {} : { keywords }), ...(enabled === undefined ? {} : { enabled }) });
         ctx.store.setSetting(ctx.conversationId, 'groupSettings', JSON.stringify(updated)); return { saved: true, settings: updated };
@@ -133,7 +156,7 @@ export function makeTools(ctx: ToolContext) {
       tools.push(tool(wrap(async ({ type, subjectId, content }: { type: 'user' | 'group'; subjectId: string; content: string }) => {
         const resolved = type === 'user' ? ctx.store.memory.lookup(ctx.scope, ctx.conversationId, subjectId) ?? (ctx.store.memory.listIdentities().some((alias) => alias.user_id === subjectId) ? subjectId : undefined) : subjectId;
         if (!resolved) throw new Error('找不到该用户身份，请先在管理页面绑定');
-        if (type === 'group' && (ctx.scope !== 'group' || resolved !== ctx.conversationId)) throw new Error('只能从当前群管理本群记忆');
+        if (type === 'group' && (!isCommunityScope(ctx.scope) || resolved !== ctx.conversationId)) throw new Error('只能从当前群管理本群记忆');
         return { id: ctx.store.memory.add(type, resolved, content, ctx.conversationId) };
       }), { name: 'owner_add_memory', description: '创建者专用：将明确要求记住的事实保存为用户或群记忆；用户 subjectId 使用当前会话中显示的发言者 ID，群 subjectId 使用当前群会话 ID。', schema: z.object({ type: z.enum(['user', 'group']), subjectId: z.string().min(1), content: z.string().min(1).max(2000) }) }));
     }
@@ -144,7 +167,7 @@ export function makeTools(ctx: ToolContext) {
     }
     tools.push(
       tool(wrap(async ({ instruction }: { instruction: string }) => {
-        const id = ctx.tasks.enqueue(ctx.conversationId, ctx.scope, ctx.replyTo, instruction);
+        const id = ctx.tasks.enqueue(ctx.conversationId, ctx.scope, ctx.replyTo, instruction,ctx.actorId);
         return { taskId: id, status: 'queued', message: '任务已在后台开始；完成或失败后会回到当前会话。' };
       }), { name: 'start_background_task', description: '启动独立子 Agent 执行耗时任务，随后结束当前回合；完成、进度或问题会自动回调。将用户要求、链接及交付格式完整写进 instruction。', returnDirect: true, schema: z.object({ instruction: z.string().min(1).max(5000) }) }),
       tool(wrap(async ({ taskId }: { taskId: string }) => {
@@ -182,7 +205,7 @@ export function makeTools(ctx: ToolContext) {
     tools.push(tool(wrap(async ({ progress }: { progress: string }) => { ctx.tasks.reportProgress(id, progress); return { queued: true }; }), { name: 'report_progress', description: '向主 Agent 报告值得告知群友的重大进展，不要为每个细节刷屏。', schema: z.object({ progress: z.string().min(1).max(1000) }) }));
   }
   const disabled = new Set<string>();
-  if (ctx.scope === 'group') for (const name of groupSettings(ctx.store, ctx.conversationId).disabledTools) disabled.add(name);
+  if (isCommunityScope(ctx.scope)) for (const name of groupSettings(ctx.store, ctx.conversationId).disabledTools) disabled.add(name);
   if (!config.tools.search) { disabled.add('web_search'); disabled.add('research_web'); disabled.add('search_images'); disabled.add('download_file'); disabled.add('read_webpage'); }
   if (!config.tools.media) { disabled.add('download_media'); disabled.add('extract_audio'); disabled.add('inspect_media'); disabled.add('deliver_media'); }
   if (!config.tools.voice) { disabled.add('speak'); disabled.add('list_voices'); disabled.add('set_voice'); }

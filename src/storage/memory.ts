@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
-import type { Scope } from '../domain/types.js';
+import { isCommunityScope, type Scope } from '../domain/types.js';
 
 export type SubjectType = 'user' | 'group';
 export interface MemoryEntry { id: string; subject_type: SubjectType; subject_id: string; content: string; source_conversation_id: string; source_start: number | null; source_end: number | null; created_at: string; updated_at: string }
@@ -22,6 +22,9 @@ export class MemoryRepository {
         source_start INTEGER, source_end INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS subject_memories_subject ON subject_memories(subject_type,subject_id,updated_at);
+      CREATE TABLE IF NOT EXISTS legacy_memory_actions (
+        legacy_id TEXT PRIMARY KEY, action TEXT NOT NULL, resolved_memory_id TEXT, updated_at TEXT NOT NULL
+      );
     `);
     const prior = db.prepare("SELECT DISTINCT scope,conversation_id,sender_id,sender_name FROM messages WHERE direction='in'").all() as Array<{scope: Scope; conversation_id: string; sender_id: string; sender_name: string | null}>;
     for (const row of prior) this.observe(row.scope, row.conversation_id, row.sender_id, row.sender_name ?? undefined);
@@ -40,7 +43,7 @@ export class MemoryRepository {
       // An unresolved user ID must never be silently converted into a group fact.
       // Keep the original row in the legacy table for later review.
       if (row.subject_id && !person) continue;
-      if (!person && msg.scope !== 'group') continue;
+      if (!person && !isCommunityScope(msg.scope)) continue;
       insert.run(row.id, person ? 'user' : 'group', person ?? row.conversation_id, row.content, row.conversation_id, row.source_start, row.source_end, row.created_at, row.created_at);
     }
     db.prepare("INSERT OR IGNORE INTO app_settings VALUES ('subject_memories_migrated','1',?)").run(new Date().toISOString());
@@ -105,6 +108,22 @@ export class MemoryRepository {
   list(type?: SubjectType, subject?: string): MemoryEntry[] {
     return this.db.prepare('SELECT * FROM subject_memories WHERE (? IS NULL OR subject_type=?) AND (? IS NULL OR subject_id=?) ORDER BY updated_at DESC LIMIT 500').all(type ?? null,type ?? null,subject ?? null,subject ?? null) as MemoryEntry[];
   }
+  unresolvedLegacy(): Array<{id:string;conversation_id:string;subject_id:string|null;content:string;created_at:string}> {
+    return this.db.prepare(`SELECT m.id,m.conversation_id,m.subject_id,m.content,m.created_at FROM memories m
+      LEFT JOIN subject_memories s ON s.id=m.id LEFT JOIN legacy_memory_actions a ON a.legacy_id=m.id
+      WHERE s.id IS NULL AND a.legacy_id IS NULL ORDER BY m.created_at DESC LIMIT 500`).all() as Array<{id:string;conversation_id:string;subject_id:string|null;content:string;created_at:string}>;
+  }
+  resolveLegacy(legacyId:string, type:SubjectType, subjectId:string, content?:string): string {
+    return this.db.transaction(() => {
+      const row=this.unresolvedLegacy().find((entry)=>entry.id===legacyId);
+      if (!row) throw new Error('待处理旧记忆不存在或已处理');
+      if (type==='user' && !this.db.prepare('SELECT 1 FROM identity_aliases WHERE user_id=? LIMIT 1').get(subjectId)) throw new Error('用户身份不存在');
+      if (type==='group' && !this.db.prepare("SELECT 1 FROM messages WHERE scope IN ('group','guild') AND conversation_id=? LIMIT 1").get(subjectId)) throw new Error('群聊或频道不存在');
+      const created=this.add(type,subjectId,content ?? row.content,row.conversation_id);
+      this.db.prepare('INSERT INTO legacy_memory_actions VALUES (?,?,?,?)').run(legacyId,'resolved',created,new Date().toISOString());
+      return created;
+    })();
+  }
   edit(id: string, content: string): boolean {
     if (!content.trim() || content.length > 2000) throw new Error('记忆内容无效');
     return this.db.prepare('UPDATE subject_memories SET content=?,updated_at=? WHERE id=?').run(content, new Date().toISOString(), id).changes > 0;
@@ -112,7 +131,7 @@ export class MemoryRepository {
   delete(id: string): boolean { return this.db.prepare('DELETE FROM subject_memories WHERE id=?').run(id).changes > 0; }
   context(scope: Scope, conversationId: string, participants: string[]): MemoryEntry[] {
     const people = [...new Set(participants.map((external) => this.lookup(scope, conversationId, external)).filter((x): x is string => !!x))];
-    const group = scope === 'group' ? this.list('group', conversationId).slice(0, 20) : [];
+    const group = isCommunityScope(scope) ? this.list('group', conversationId).slice(0, 20) : [];
     const users = people.slice(0, 20).flatMap((id) => this.list('user', id).slice(0, 8));
     return [...group, ...users].slice(0, 60);
   }

@@ -14,6 +14,14 @@ const configSchema = z.object({
   tasks: z.object({ concurrency: z.number().int().min(1).max(8).default(2), timeoutMs: z.number().int().min(10000).default(1800000) }).default({ concurrency: 2, timeoutMs: 1800000 }),
 });
 export type AppConfig = z.infer<typeof configSchema>;
+export const runtimeOverrideSchema = z.object({
+  model:z.object({provider:z.enum(['openai','anthropic']).optional(),baseUrl:z.string().url().optional(),name:z.string().min(1).optional(),apiKey:z.string().min(1).optional(),vision:z.boolean().optional(),contextTokens:z.number().int().min(4096).max(1048576).optional(),timeoutMs:z.number().int().min(1000).optional()}).optional(),
+  memory:z.object({recentMessages:z.number().int().min(5).max(300).optional(),summarizeAfter:z.number().int().min(10).optional()}).optional(),
+  tasks:z.object({concurrency:z.number().int().min(1).max(8).optional(),timeoutMs:z.number().int().min(10000).optional()}).optional(),
+  tools:z.object({search:z.boolean().optional(),media:z.boolean().optional(),python:z.boolean().optional()}).optional(),
+});
+let runtimeConfigProvider: (() => string | undefined) | undefined;
+export function setRuntimeConfigProvider(provider?: () => string | undefined): void { runtimeConfigProvider=provider; }
 export const dataDir = path.resolve(process.env.BOT_DATA_DIR ?? './data');
 function databasePath(envName: string, fallback: string): string {
   const file = path.resolve(process.env[envName] ?? path.join(dataDir, fallback));
@@ -47,6 +55,11 @@ export function readConfig(): AppConfig {
   if (env('DEEPSEEK_SEARCH_BASE_URL')) config.tools.deepseekSearchBaseUrl = env('DEEPSEEK_SEARCH_BASE_URL')!;
   if (env('DEEPSEEK_SEARCH_MODEL')) config.tools.deepseekSearchModel = env('DEEPSEEK_SEARCH_MODEL')!;
   if (process.env.PYTHON_RUNNER_URL) config.tools.pythonRunnerUrl = process.env.PYTHON_RUNNER_URL;
+  const stored=runtimeConfigProvider?.();
+  if (stored) {
+    const override=runtimeOverrideSchema.parse(JSON.parse(stored));
+    for (const section of ['model','memory','tasks','tools'] as const) if (override[section]) Object.assign(config[section],override[section]);
+  }
   return configSchema.parse(config);
 }
 

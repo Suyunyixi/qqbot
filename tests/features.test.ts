@@ -4,9 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import type { InboundEvent } from '../src/domain/types.js';
+import { ToolMessage } from '@langchain/core/messages';
 
 process.env.BOT_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-features-'));
-const { initConfig } = await import('../src/config/settings.js'); initConfig();
+const { initConfig, readConfig, setRuntimeConfigProvider } = await import('../src/config/settings.js'); initConfig();
 const { Store } = await import('../src/storage/store.js');
 const { Harness } = await import('../src/agent/harness.js');
 const { ReplyRuntime } = await import('../src/delivery/reply.js');
@@ -16,6 +17,7 @@ const { workspaceFor } = await import('../src/storage/workspace.js');
 const { handleAdmin } = await import('../src/admin/api.js');
 const { searchWeb } = await import('../src/tools/search.js');
 const { recentSocialContext } = await import('../src/agent/social-context.js');
+const { hasEvidence, needsCurrentResearch } = await import('../src/agent/research-gate.js');
 function event(group:string,user:string,id:string): InboundEvent { return { id,conversationId:group,scope:'group',senderId:user,senderName:user,content:'消息',timestamp:new Date().toISOString(),isMention:false,attachments:[] }; }
 
 describe('全局用户记忆和创建者权限', () => {
@@ -44,6 +46,9 @@ describe('全局用户记忆和创建者权限', () => {
     const base={conversationId:'g',scope:'group' as const,store,reply,tasks,background:false};
     expect(makeTools({...base,owner:false}).some((t)=>t.name==='owner_set_persona')).toBe(false);
     expect(makeTools({...base,owner:true}).some((t)=>t.name==='owner_set_persona')).toBe(true);
+    const api=vi.fn(async()=>({ok:true}));
+    expect(makeTools({...base,owner:false,qqApi:api}).some((t)=>t.name==='owner_qq_api')).toBe(false);
+    expect(makeTools({...base,background:true,owner:true,qqApi:api}).some((t)=>t.name==='owner_qq_api')).toBe(true);
     store.memory.detach('group','g','owner-member');
     expect(store.memory.isOwner('group','g','owner-member')).toBe(false);
     expect(store.memory.isOwner('c2c','owner-c2c','owner-c2c')).toBe(true);
@@ -56,6 +61,14 @@ describe('全局用户记忆和创建者权限', () => {
     expect(await harness.receive({...event('quiet','u','1'),isMention:true,content:'你好'})).toBe(false);
     expect(store.recent('quiet',10)).toHaveLength(1);expect(send).not.toHaveBeenCalled();harness.stop();store.close();
   });
+  it('普通用户明确要求记住时立即保存自己的跨群记忆', async () => {
+    const store=new Store(':memory:');store.record(event('g1','member','1'));store.record(event('g2','member','2'));
+    const reply=new ReplyRuntime(store,{send:async()=>({})});const tasks=new TaskManager(store,async()=>'',async()=>{});
+    const remember=makeTools({conversationId:'g1',scope:'group',actorId:'member',owner:false,store,reply,tasks,background:false}).find((item)=>item.name==='remember_fact')!;
+    expect(JSON.parse(String(await remember.invoke({type:'self',content:'喜欢猫'}))).ok).toBe(true);
+    expect(store.memory.context('group','g2',['member']).map((m)=>m.content)).toContain('喜欢猫');
+    tasks.stop();store.close();
+  });
   it('无法对应用户的旧记忆保留原表，不错误变成群记忆', () => {
     const file=path.join(fs.mkdtempSync(path.join(os.tmpdir(),'qq-memory-migration-')),'history.sqlite');
     const first=new Store(file);first.record(event('g','known','1'));
@@ -64,7 +77,12 @@ describe('全局用户记忆和创建者权限', () => {
     const reopened=new Store(file);
     expect(reopened.memory.list('group','g')).toEqual([]);
     expect(reopened.memories('g').map((m)=>m.content)).toContain('旧用户记忆');
+    const old=reopened.memory.unresolvedLegacy()[0]!;
+    const resolved=reopened.memory.resolveLegacy(old.id,'user',reopened.memory.lookup('group','g','known')!);
+    expect(reopened.memory.unresolvedLegacy()).toEqual([]);
+    expect(reopened.memory.list('user',reopened.memory.lookup('group','g','known')!).map((m)=>m.content)).toContain('旧用户记忆');
     reopened.close();
+    const again=new Store(file);expect(again.memory.list().some((m)=>m.id===resolved)).toBe(true);again.close();
   });
 });
 
@@ -72,6 +90,7 @@ describe('管理页面接口', () => {
   it('展示并动态修改群配置和记忆，拒绝跨站写入', async () => {
     const store=new Store(':memory:');store.record(event('g','u','1'));
     const server=http.createServer((req,res)=>void handleAdmin(req,res,store,undefined));await new Promise<void>((resolve)=>server.listen(0,'127.0.0.1',resolve));
+    setRuntimeConfigProvider(()=>store.getAppSetting('runtime_config'));
     const address=server.address();if(!address||typeof address==='string')throw Error('listen');const origin=`http://127.0.0.1:${address.port}`;
     try {
       const settings={label:'测试群',enabled:true,keywords:['唤醒'],persona:'轻松',disabledTools:['web_search']};
@@ -81,7 +100,15 @@ describe('管理页面接口', () => {
       const user=store.memory.lookup('group','g','u')!;
       const create=await fetch(origin+'/api/memories',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({type:'user',subjectId:user,content:'喜欢音乐',conversationId:'g'})});expect(create.status).toBe(200);
       const memories=await (await fetch(origin+'/api/memories')).json() as {memories:Array<{content:string}>};expect(memories.memories[0]?.content).toBe('喜欢音乐');
-    } finally {await new Promise<void>((resolve)=>server.close(()=>resolve()));store.close();}
+      for(let i=0;i<115;i++)store.record({...event('g','u',`history-${i}`),content:`测试记录 ${i}`});
+      const page1=await (await fetch(origin+'/api/messages?conversationId=g&q='+encodeURIComponent('测试记录'))).json() as {messages:Array<{content:string}>;hasMore:boolean;nextBefore:number};
+      expect(page1.messages).toHaveLength(100);expect(page1.hasMore).toBe(true);
+      const page2=await (await fetch(origin+'/api/messages?conversationId=g&q='+encodeURIComponent('测试记录')+'&before='+page1.nextBefore)).json() as {messages:Array<{content:string}>};
+      expect(page2.messages).toHaveLength(15);expect(page2.messages[0]?.content).toBe('测试记录 0');
+      const save=await fetch(origin+'/api/runtime-config',{method:'PUT',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({model:{name:'new-model',apiKey:'test-secret'}})});expect(save.status).toBe(200);
+      expect(readConfig().model.name).toBe('new-model');expect(readConfig().model.apiKey).toBe('test-secret');
+      const visible=await (await fetch(origin+'/api/runtime-config')).text();expect(visible).not.toContain('test-secret');expect(visible).toContain('new-model');
+    } finally {setRuntimeConfigProvider(undefined);await new Promise<void>((resolve)=>server.close(()=>resolve()));store.close();}
   });
 });
 
@@ -101,6 +128,13 @@ describe('完整媒体交付', () => {
 });
 
 describe('DSH 同款结构化联网搜索', () => {
+  it('最新请求要求读取真实原文，空结果和错误不能当作证据', () => {
+    expect(needsCurrentResearch('给我最新强度榜')).toBe(true);expect(needsCurrentResearch('今天心情不错')).toBe(false);
+    const msg=(content:string)=>new ToolMessage({tool_call_id:'1',name:'research_web',content});
+    expect(hasEvidence(msg(JSON.stringify({ok:true,result:{reads:[]}})))).toBe(false);
+    expect(hasEvidence(msg(JSON.stringify({ok:false,error:'失败'})))).toBe(false);
+    expect(hasEvidence(msg(JSON.stringify({ok:true,result:{reads:[{document:{text:'来源正文'}}]}})))).toBe(true);
+  });
   it('只使用原生 web_search_tool_result 来源并保留发布时间', async () => {
     const old={base:process.env.MODEL_BASE_URL,key:process.env.MODEL_API_KEY,provider:process.env.SEARCH_PROVIDER};process.env.MODEL_BASE_URL='https://api.deepseek.com';process.env.MODEL_API_KEY='test-key';process.env.SEARCH_PROVIDER='deepseek';
     const spy=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(JSON.stringify({content:[{type:'text',text:'不能当作来源'},{type:'web_search_tool_result',content:[{type:'web_search_result',url:'https://example.com/source',title:'来源',page_age:'2026-11-01'}]}]}),{status:200}));

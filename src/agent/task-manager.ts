@@ -12,9 +12,9 @@ export class TaskManager {
   private waiting = new Map<string, (answer: string) => void>();
   private stopping = false;
   constructor(private readonly store: Store, private readonly runTask: TaskRunner, private readonly onResult: Callback) {}
-  start(): void { this.store.interruptRunning(); this.pump(); }
-  enqueue(conversationId: string, scope: Scope, replyTo: string | undefined, instruction: string): string {
-    const id = this.store.addTask(conversationId, scope, replyTo, instruction); this.pump(); return id;
+  start(): void { this.store.recoverTasks(); this.pump(); }
+  enqueue(conversationId: string, scope: Scope, replyTo: string | undefined, instruction: string, actorId?:string): string {
+    const id = this.store.addTask(conversationId, scope, replyTo, instruction,actorId); this.pump(); return id;
   }
   cancel(id: string, conversationId: string): string {
     const task = this.store.task(id);
@@ -28,7 +28,7 @@ export class TaskManager {
     const task = this.store.task(id);
     if (!task) throw new Error('找不到任务');
     if (!['failed', 'interrupted', 'cancelled'].includes(task.status)) throw new Error('只有失败、中断或取消的任务可以重新执行');
-    return this.enqueue(task.conversation_id, task.scope, task.reply_to ?? undefined, task.instruction);
+    return this.enqueue(task.conversation_id, task.scope, task.reply_to ?? undefined, task.instruction,task.actor_id ?? undefined);
   }
   update(id: string, conversationId: string, instruction: string): string {
     const task = this.store.task(id);
@@ -87,9 +87,9 @@ export class TaskManager {
       this.store.setTask(task.id, 'running');
       const timer = setTimeout(() => controller.abort(), readConfig().tasks.timeoutMs);
       void this.runWithUpdates(task, controller.signal).then((result) => {
-        if (this.store.task(task.id)?.status !== 'cancelled') this.store.setTask(task.id, 'completed', result);
+        if (!['cancelled','interrupted'].includes(this.store.task(task.id)?.status ?? '')) this.store.setTask(task.id, 'completed', result);
       }).catch((err: unknown) => {
-        if (this.store.task(task.id)?.status !== 'cancelled') this.store.setTask(task.id, 'failed', undefined, err instanceof Error ? err.message : String(err));
+        if (!['cancelled','interrupted'].includes(this.store.task(task.id)?.status ?? '')) this.store.setTask(task.id, 'failed', undefined, err instanceof Error ? err.message : String(err));
       }).finally(() => {
         clearTimeout(timer); this.running.delete(task.id); this.notifyPending(); this.pump();
       });
@@ -100,11 +100,11 @@ export class TaskManager {
     let result = '';
     do {
       result = await this.runTask(current, signal);
-      const updates = this.store.takeTaskUpdates(task.id);
-      if (!updates.length) return result;
-      current = { ...task, instruction: `原任务：${task.instruction}\n此前执行结果：${result}\n用户追加要求：${updates.join('\n')}` };
+      const instruction = this.store.prepareTaskContinuation(task.id,task.instruction,result);
+      if (!instruction) return result;
+      current = { ...task, instruction };
     } while (!signal.aborted);
     throw new Error('任务已取消或超时');
   }
-  stop(): void { this.stopping = true; for (const controller of this.running.values()) controller.abort(); }
+  stop(): void { this.stopping = true; for (const [id,controller] of this.running) { if(['running','waiting'].includes(this.store.task(id)?.status ?? ''))this.store.setTask(id,'interrupted',undefined,'服务退出，等待自动恢复');controller.abort(); } }
 }

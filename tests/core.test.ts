@@ -15,6 +15,7 @@ process.env.MODEL_NAME = 'test-model';
 const { initConfig, readConfig, configPath } = await import('../src/config/settings.js');
 const { Store } = await import('../src/storage/store.js');
 const { Harness } = await import('../src/agent/harness.js');
+const { AgentRuntime } = await import('../src/agent/runtime.js');
 const { ReplyRuntime, splitText } = await import('../src/delivery/reply.js');
 const { shouldRespond } = await import('../src/agent/trigger.js');
 const { TaskManager } = await import('../src/agent/task-manager.js');
@@ -192,6 +193,22 @@ describe('有序回复', () => {
 });
 
 describe('后台任务', () => {
+  it('重启时恢复同一个中断任务并保留追加要求', async () => {
+    const store=new Store(':memory:');
+    const first=new TaskManager(store,async(_task,signal)=>new Promise<string>((_resolve,reject)=>{signal.addEventListener('abort',()=>reject(Error('stopped')),{once:true})}),async()=>{});
+    const id=first.enqueue('recover-group','group','message','长任务');
+    first.update(id,'recover-group','补充要求');
+    first.stop();
+    await new Promise((resolve)=>setTimeout(resolve,20));
+    expect(store.task(id)?.status).toBe('interrupted');
+    const calls:string[]=[];
+    const second=new TaskManager(store,async(task)=>{calls.push(task.instruction);return '恢复结果'},async()=>{});
+    second.start();
+    await vi.waitFor(()=>expect(store.task(id)?.status).toBe('completed'));
+    expect(calls.length).toBe(2);
+    expect(calls[1]).toContain('补充要求');
+    second.stop();store.close();
+  });
   it('子 Agent 可直接发送文件，主 Agent 回调重放同一文件不会重复投递', async () => {
     const store = new Store(':memory:');
     const sent: string[] = [];
@@ -260,6 +277,8 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
   let port = 0;
   let fileToSend = '';
   let releaseInterjection: (() => void) | undefined;
+  let releaseRecovery: (() => void) | undefined;
+  let resumeRecovery = false;
   const requests: Array<Record<string, unknown>> = [];
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -284,8 +303,14 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
         const thinkingScenario = allText.includes('思考工具回放');
         const permissionScenario = allText.includes('尝试写入权限验证');
         const last = parsed.messages.at(-1);
+        if (allText.includes('恢复中途测试') && isChild && last?.role === 'tool' && !resumeRecovery) {
+          releaseRecovery=()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({id:'resume-held',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:'任务恢复完成'},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}))};
+          return;
+        }
         let reply: Record<string, unknown>;
         if (allText.includes('插话整合测试') && allText.includes('关键补充')) reply = { role:'assistant',content:'已看到群友的关键补充' };
+        else if (allText.includes('恢复中途测试') && isChild && last?.role !== 'tool') reply={role:'assistant',content:null,tool_calls:[{id:'recovery-write',type:'function',function:{name:'write_file',arguments:JSON.stringify({file_path:'/recovery.txt',content:'checkpoint'})}}]};
+        else if (allText.includes('恢复中途测试') && isChild) reply={role:'assistant',content:'任务恢复完成'};
         else if (permissionScenario && last?.role !== 'tool') reply = { role: 'assistant', content: null, tool_calls: [{ id: 'denied-write', type: 'function', function: { name: 'write_file', arguments: JSON.stringify({ file_path: '/denied.txt', content: 'must not be written' }) } }] };
         else if (permissionScenario) reply = { role: 'assistant', content: '权限测试完成' };
         else if (thinkingScenario && last?.role !== 'tool') reply = { role: 'assistant', content: null, reasoning_content: 'provider-thinking-token', tool_calls: [{ id: 'thinking-call', type: 'function', function: { name: 'send_text', arguments: JSON.stringify({ text: '处理中' }) } }] };
@@ -359,6 +384,15 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(JSON.stringify(requests.at(-1)?.messages)).toContain('小王');
     harness.stop(); store.close();
   }, 20000);
+  it('需要最新排行时，模型不查来源就作答会被拦截并如实说明', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
+    const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'qq-research'}}});
+    await harness.receive(event({id:'research-gate',conversationId:'group-research-gate',content:'给我最新排行',isMention:true}));
+    await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+    expect(delivered[0]?.content).toContain('没有取得能核对的来源原文');
+    expect(delivered[0]?.content).not.toContain('NAS');
+    harness.stop();store.close();
+  },20000);
   it('正在处理时吸收群友插话，未触发消息本身不启动模型', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
     const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'ok'}}});
@@ -413,4 +447,24 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(store.listTasks('group-task')[0]?.result).toContain(fileToSend);
     harness.stop(); store.close();
   }, 20000);
+  it('后台任务使用独立检查点，恢复已完成步骤时不再次请求模型', async () => {
+    const store=new Store(':memory:');const reply=new ReplyRuntime(store,{send:async()=>({id:'test'})});const tasks=new TaskManager(store,async()=>'',async()=>{});
+    const id=store.addTask('checkpoint-group','group',undefined,'后台处理指定测试');const task=store.task(id)!;
+    const runtime=new AgentRuntime(store);const ctx={conversationId:task.conversation_id,scope:task.scope,store,reply,tasks,background:true,taskId:id};
+    const first=await runtime.runBackground(ctx,task,new AbortController().signal);const count=requests.length;
+    const second=await runtime.runBackground(ctx,task,new AbortController().signal);
+    expect(second).toBe(first);expect(requests.length).toBe(count);
+    tasks.stop();store.close();
+  },20000);
+  it('中途终止的后台任务从检查点继续，不重复已完成的文件步骤', async () => {
+    const store=new Store(':memory:');const reply=new ReplyRuntime(store,{send:async()=>({})});const tasks=new TaskManager(store,async()=>'',async()=>{});
+    const id=store.addTask('checkpoint-interrupted','group',undefined,'恢复中途测试');const task=store.task(id)!;const runtime=new AgentRuntime(store);
+    const ctx={conversationId:task.conversation_id,scope:task.scope,store,reply,tasks,background:true,taskId:id};const controller=new AbortController();releaseRecovery=undefined;resumeRecovery=false;
+    const running=runtime.runBackground(ctx,task,controller.signal).catch(()=>undefined);
+    await vi.waitFor(()=>expect(releaseRecovery).toBeDefined(),{timeout:15000});controller.abort();resumeRecovery=true;releaseRecovery!();await running;
+    const priorRequests=requests.length;const result=await runtime.runBackground(ctx,task,new AbortController().signal);
+    expect(result).toContain('任务恢复完成');expect(fs.readFileSync(path.join(workspaceFor('checkpoint-interrupted'),'recovery.txt'),'utf8')).toBe('checkpoint');
+    expect(requests.slice(priorRequests).length).toBeLessThanOrEqual(2);
+    tasks.stop();store.close();
+  },30000);
 });

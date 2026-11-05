@@ -1,6 +1,6 @@
 import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages';
 import { createMiddleware } from 'langchain';
-import type { Scope } from '../domain/types.js';
+import { isCommunityScope, type Scope } from '../domain/types.js';
 import type { Store, MessageRow } from '../storage/store.js';
 import type { AppConfig } from '../config/settings.js';
 
@@ -8,7 +8,7 @@ import type { AppConfig } from '../config/settings.js';
 export function liveContext(store: Store, scope: Scope, conversationId: string, config: AppConfig, startSeq: number) {
   let cursor = startSeq; let finalRechecks = 0;
   type Row = MessageRow & { is_mention: number };
-  const pending = () => scope !== 'group' ? [] : store.db.prepare("SELECT * FROM messages WHERE conversation_id=? AND direction='in' AND seq>? ORDER BY seq LIMIT 100").all(conversationId,cursor) as Row[];
+  const pending = () => !isCommunityScope(scope) ? [] : store.db.prepare("SELECT * FROM messages WHERE conversation_id=? AND direction='in' AND seq>? ORDER BY seq LIMIT 100").all(conversationId,cursor) as Row[];
   const silent = (rows: Row[]) => rows.filter((row) => {
     return !row.is_mention && !config.trigger.keywords.some((keyword) => row.content.includes(keyword));
   });
@@ -30,7 +30,7 @@ export function liveContext(store: Store, scope: Scope, conversationId: string, 
       finalRechecks++; return {messages:[message],jumpTo:'model' as const};
     } },
     wrapToolCall: async (request, handler) => {
-      if (['send_text','send_media','send_native_card'].includes(request.toolCall.name) && hasPending()) return new ToolMessage({tool_call_id:request.toolCall.id!,name:request.toolCall.name,status:'error',content:'当前群有新的插话尚未纳入本轮，请结合接下来的群聊补充再决定如何交付。'});
+      if (['send_text','send_media','send_native_card','send_keyboard','send_embed'].includes(request.toolCall.name) && hasPending()) return new ToolMessage({tool_call_id:request.toolCall.id!,name:request.toolCall.name,status:'error',content:'当前群有新的插话尚未纳入本轮，请结合接下来的群聊补充再决定如何交付。'});
       return handler(request);
     },
   });

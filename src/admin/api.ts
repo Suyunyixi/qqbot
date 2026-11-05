@@ -1,11 +1,15 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { persona } from '../agent/runtime.js';
-import type { Store } from '../storage/store.js';
+import { Store } from '../storage/store.js';
 import type { Harness } from '../agent/harness.js';
 import { groupSettings, groupSettingsSchema } from '../config/group.js';
 import { toolPermissions } from '../tools/sandbox.js';
 import { z } from 'zod';
 import { readConfig, runtimeOverrideSchema } from '../config/settings.js';
+import { registeredPlugins, reloadPlugins } from '../tools/plugins.js';
+import { makeTools } from '../tools/registry.js';
+import { ReplyRuntime } from '../delivery/reply.js';
+import { TaskManager } from '../agent/task-manager.js';
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value));
@@ -53,6 +57,15 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
       json(res, 200, { hasMore, nextBefore:hasMore ? page[page.length-1]?.seq : null, messages: page.reverse().map(({raw, ...row}) => { let eventType: unknown; try { eventType = typeof raw === 'string' ? (JSON.parse(raw) as {rawEventType?:unknown}).rawEventType : undefined; } catch { /* older record */ } return { ...row, eventType }; }) }); return;
     }
     if (req.method === 'GET' && url.pathname === '/api/tools') { json(res, 200, { tools: Object.keys(toolPermissions).filter((name) => !name.startsWith('owner_')).sort() }); return; }
+    if (req.method === 'GET' && url.pathname === '/api/plugins') { json(res,200,{plugins:registeredPlugins().map((item)=>({name:item.name,permissions:item.permissions}))});return; }
+    if (req.method === 'POST' && url.pathname === '/api/plugins/reload') {
+      const items=await reloadPlugins(undefined,(candidates)=>{
+        const probe=new Store(':memory:');const reply=new ReplyRuntime(probe,{send:async()=>({})});const tasks=new TaskManager(probe,async()=>'',async()=>{});
+        try {for(const background of [false,true])makeTools({conversationId:'_plugin_check',scope:'group',store:probe,reply,tasks,background,taskId:background?'00000000-0000-4000-8000-000000000000':undefined},candidates);}
+        finally {tasks.stop();probe.close();}
+      });
+      json(res,200,{plugins:items.map((item)=>({name:item.name,permissions:item.permissions}))});return;
+    }
     if (req.method === 'GET' && url.pathname === '/api/qq-events') { json(res,200,{events:store.db.prepare('SELECT seq,event_type,payload,received_at FROM qq_events ORDER BY seq DESC LIMIT 100').all()});return; }
     if (req.method === 'GET' && url.pathname === '/api/runtime-config') {
       const config=readConfig(); const {apiKey,...model}=config.model;
@@ -64,6 +77,7 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
       for(const section of ['model','memory','tasks','tools'] as const) if(input[section]) Object.assign(existing[section] ?? (existing[section]={}),input[section]);
       store.setAppSetting('runtime_config',JSON.stringify(existing));json(res,200,{ok:true,effective:'next-turn'});return;
     }
+    if (req.method === 'DELETE' && url.pathname === '/api/runtime-config') {store.db.prepare("DELETE FROM app_settings WHERE key='runtime_config'").run();json(res,200,{ok:true,effective:'next-turn'});return;}
     if (req.method === 'PUT' && url.pathname === '/api/group') {
       const input = z.object({ conversationId: id, settings: groupSettingsSchema }).parse(await body(req));
       if (!store.db.prepare("SELECT 1 FROM messages WHERE conversation_id=? AND scope IN ('group','guild') LIMIT 1").get(input.conversationId)) throw new Error('群聊或频道不存在');

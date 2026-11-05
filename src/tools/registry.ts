@@ -13,7 +13,7 @@ import { isCommunityScope, type DeliveryKind, type Scope } from '../domain/types
 import { downloadPublicFile, readPublicWebpage, validateUrl } from './web.js';
 import { getMaxUploadSize, MediaFileType } from '@tencent-connect/qqbot-nodejs';
 import { researchWeb, searchWeb } from './search.js';
-import { registeredPlugins } from './plugins.js';
+import { registeredPlugins, type ToolPlugin } from './plugins.js';
 import { permitted, toolPermissions } from './sandbox.js';
 import { workspaceFor, resolveWorkspaceFile } from '../storage/workspace.js';
 import { buildNativeArk, nativeCardSchema } from '../domain/card.js';
@@ -47,7 +47,7 @@ function wrap<T>(fn: (value: T) => Promise<unknown>): (value: T) => Promise<stri
     catch (error) { return JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
   };
 }
-export function makeTools(ctx: ToolContext) {
+export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=registeredPlugins()) {
   const config = readConfig();
   const tools: StructuredToolInterface[] = [
     tool(wrap(async () => ({ sandbox: 'docker-container', workspace: workspaceFor(ctx.conversationId), permissions: readConfig().sandbox.permissions, toolPermissions })), { name: 'sandbox_capabilities', description: '查看当前容器沙箱、会话工作目录和工具权限；主机上的工作区由管理员映射。', schema: z.object({}) }),
@@ -216,7 +216,7 @@ export function makeTools(ctx: ToolContext) {
     if (!required) throw new Error(`工具未声明沙箱权限：${item.name}`);
     return !disabled.has(item.name) && permitted(required, config);
   });
-  for (const plugin of registeredPlugins()) if (permitted(plugin.permissions, config)) selected.push(...plugin.createTools(ctx).filter((item) => !disabled.has(item.name)));
+  for (const plugin of pluginList) if (permitted(plugin.permissions, config)) selected.push(...plugin.createTools(ctx).filter((item) => !disabled.has(item.name)));
   const names = new Set<string>();
   for (const item of selected) { if (names.has(item.name)) throw new Error(`工具名称重复：${item.name}`); names.add(item.name); }
   return selected;

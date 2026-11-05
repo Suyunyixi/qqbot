@@ -105,9 +105,11 @@ describe('管理页面接口', () => {
       expect(page1.messages).toHaveLength(100);expect(page1.hasMore).toBe(true);
       const page2=await (await fetch(origin+'/api/messages?conversationId=g&q='+encodeURIComponent('测试记录')+'&before='+page1.nextBefore)).json() as {messages:Array<{content:string}>};
       expect(page2.messages).toHaveLength(15);expect(page2.messages[0]?.content).toBe('测试记录 0');
+      const initialName=readConfig().model.name;
       const save=await fetch(origin+'/api/runtime-config',{method:'PUT',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({model:{name:'new-model',apiKey:'test-secret'}})});expect(save.status).toBe(200);
       expect(readConfig().model.name).toBe('new-model');expect(readConfig().model.apiKey).toBe('test-secret');
       const visible=await (await fetch(origin+'/api/runtime-config')).text();expect(visible).not.toContain('test-secret');expect(visible).toContain('new-model');
+      const reset=await fetch(origin+'/api/runtime-config',{method:'DELETE',headers:{Origin:origin,'Content-Type':'application/json'},body:'{}'});expect(reset.status).toBe(200);expect(readConfig().model.name).toBe(initialName);
     } finally {setRuntimeConfigProvider(undefined);await new Promise<void>((resolve)=>server.close(()=>resolve()));store.close();}
   });
 });

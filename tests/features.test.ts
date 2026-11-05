@@ -21,7 +21,6 @@ const { recentActivityMarker } = await import('../src/agent/social-context.js');
 const { hasEvidence, needsCurrentResearch } = await import('../src/agent/research-gate.js');
 const { capabilityManifest } = await import('../src/agent/capabilities.js');
 const { quotedMessage } = await import('../src/agent/quoted-message.js');
-const { requestsPersonaChange } = await import('../src/agent/persona-intent.js');
 const { internalSubagentTools } = await import('../src/agent/subagent-policy.js');
 const { conversationFocus, formatConversationFocus } = await import('../src/agent/conversation-focus.js');
 const { conversationReview } = await import('../src/agent/conversation-review.js');
@@ -70,20 +69,17 @@ describe('全局用户记忆和创建者权限', () => {
     expect(capabilityManifest(['run_shell_command'],[],'group',true).downloads).toEqual({publicFiles:true,supportedMediaSites:null,scriptFallback:true});
     expect(capabilityManifest(['run_shell_command'],[],'group',false).downloads.publicFiles).toBe(false);
   });
-  it('只有创建者在当前消息明确要求时才能修改主人格，变更有审计', async () => {
+  it('聊天工具不能修改主人格，创建者可调整本群风格', async () => {
     const store=new Store(':memory:');store.record(event('g','owner','1'));const user=store.memory.lookup('group','g','owner')!;store.memory.setOwner(user);
     store.setPersona('原人格','admin');const reply=new ReplyRuntime(store,{send:async()=>({})});const tasks=new TaskManager(store,async()=>'',async()=>{});
     const base={conversationId:'g',scope:'group' as const,actorId:'owner',store,reply,tasks,background:false,owner:true};
-    const invoke=async(currentRequest:string)=>JSON.parse(String(await makeTools({...base,currentRequest}).find((t)=>t.name==='owner_set_persona')!.invoke({value:'新人格'}))) as {ok:boolean};
-    expect(requestsPersonaChange('不要修改人格')).toBe(false);expect(requestsPersonaChange('我感觉主人格每次都会被调整')).toBe(false);expect(requestsPersonaChange('请问怎么修改人格')).toBe(false);
-    expect((await invoke('你好')).ok).toBe(false);expect((await invoke('不要修改人格')).ok).toBe(false);expect((await invoke('我感觉主人格每次都会被调整')).ok).toBe(false);
+    for(const currentRequest of ['你好','请把主人格修改成新的设定']) expect(makeTools({...base,currentRequest}).some((tool)=>tool.name==='owner_set_persona')).toBe(false);
     expect(store.getAppSetting('persona')).toBe('原人格');expect(store.personaRevisions()).toHaveLength(1);
-    expect((await invoke('请把主人格修改成新的设定')).ok).toBe(true);expect(store.getAppSetting('persona')).toBe('新人格');expect(store.personaRevisions()[0]).toMatchObject({source:'qq',actor_id:'owner'});
+    expect(()=>store.setPersona('伪造人格','qq' as never,'owner')).toThrow('主人格只能通过本机管理页面修改');
     const groupTool=(currentRequest:string)=>makeTools({...base,currentRequest}).find((tool)=>tool.name==='owner_set_group_preferences')!;
     const refused=JSON.parse(String(await groupTool('感觉本群风格被调整了').invoke({persona:'伪造风格'}))) as {ok:boolean};expect(refused.ok).toBe(false);expect(store.getSetting('g','groupSettings')).toBeUndefined();
-    const allowed=JSON.parse(String(await groupTool('请把本群风格改成轻松聊天').invoke({persona:'轻松聊天'}))) as {ok:boolean};expect(allowed.ok).toBe(true);expect(store.getAppSetting('persona')).toBe('新人格');
-    store.memory.setOwner(store.memory.observe('group','g','different-owner'));
-    expect((await invoke('请修改人格')).ok).toBe(false);tasks.stop();store.close();
+    const allowed=JSON.parse(String(await groupTool('请把本群风格改成轻松聊天').invoke({persona:'轻松聊天'}))) as {ok:boolean};expect(allowed.ok).toBe(true);expect(store.getAppSetting('persona')).toBe('原人格');
+    tasks.stop();store.close();
   });
   it('后台文字先交给主 Agent 表达，并等待其完成', async () => {
     const store=new Store(':memory:');const sent:string[]=[];const reply=new ReplyRuntime(store,{send:async(item)=>{sent.push(item.content);return {id:'qq'}}});
@@ -133,7 +129,7 @@ describe('全局用户记忆和创建者权限', () => {
     const reply=new ReplyRuntime(store,{send:async()=>({})});const tasks=new TaskManager(store,async()=>'',async()=>{});
     const base={conversationId:'g',scope:'group' as const,store,reply,tasks,background:false};
     expect(makeTools({...base,owner:false}).some((t)=>t.name==='owner_set_persona')).toBe(false);
-    expect(makeTools({...base,owner:true}).some((t)=>t.name==='owner_set_persona')).toBe(true);
+    expect(makeTools({...base,owner:true}).some((t)=>t.name==='owner_set_persona')).toBe(false);
     const api=vi.fn(async()=>({ok:true}));
     expect(makeTools({...base,owner:false,qqApi:api}).some((t)=>t.name==='owner_qq_api')).toBe(false);
     expect(makeTools({...base,background:true,owner:true,qqApi:api}).some((t)=>t.name==='owner_qq_api')).toBe(true);

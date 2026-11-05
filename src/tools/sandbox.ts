@@ -15,7 +15,7 @@ export const toolPermissions: Record<string, readonly ToolPermission[]> = {
   start_background_task: [], check_background_task: [], cancel_background_task: [],
   list_background_tasks: [], update_background_task: [], list_pending_deliveries: [], retry_delivery: ['workspaceRead'],
   ask_user: [], report_progress: [],
-  owner_set_persona: [], owner_set_group_preferences: [], owner_add_memory: [], owner_qq_api: ['network'],
+  owner_set_group_preferences: [], owner_add_memory: [], owner_qq_api: ['network'],
 };
 export function permitted(required: readonly ToolPermission[], config: AppConfig): boolean {
   return required.every((permission) => config.sandbox.permissions[permission]);

@@ -145,7 +145,8 @@ export class Store {
     if (key === 'persona') { this.setPersona(value, 'system'); return; }
     this.db.prepare('INSERT INTO app_settings(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at').run(key, value, new Date().toISOString());
   }
-  setPersona(value: string, source: 'system' | 'admin' | 'qq', actorId?: string): boolean {
+  setPersona(value: string, source: 'system' | 'admin', actorId?: string): boolean {
+    if (source !== 'system' && source !== 'admin') throw new Error('主人格只能通过本机管理页面修改');
     return this.db.transaction(() => {
       if (this.getAppSetting('persona') === value) return false;
       const now = new Date().toISOString();

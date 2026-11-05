@@ -28,9 +28,9 @@ describe('人格管理', () => {
   it('人格修改留存版本与来源，保存相同内容不会增加版本', () => {
     const file=path.join(fs.mkdtempSync(path.join(os.tmpdir(),'qq-persona-audit-')),'persona.sqlite');
     const initial=new Store(file);expect(initial.setPersona('初始人格','admin')).toBe(true);
-    expect(initial.setPersona('初始人格','admin')).toBe(false);initial.setPersona('更新人格','qq','owner-id');initial.close();
+    expect(initial.setPersona('初始人格','admin')).toBe(false);initial.setPersona('更新人格','admin');initial.close();
     const reopened=new Store(file);expect(reopened.getAppSetting('persona')).toBe('更新人格');
-    expect(reopened.personaRevisions()).toMatchObject([{source:'qq',actor_id:'owner-id'},{source:'admin',actor_id:null}]);reopened.close();
+    expect(reopened.personaRevisions()).toMatchObject([{source:'admin',actor_id:null},{source:'admin',actor_id:null}]);reopened.close();
   });
   it('管理接口只接受本机同源有效请求', async () => {
     const store = new Store(':memory:');

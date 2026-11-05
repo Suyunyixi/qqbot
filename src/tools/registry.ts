@@ -20,7 +20,7 @@ import { buildNativeArk, nativeCardSchema } from '../domain/card.js';
 import { rasterizeSvg, renderImageCard, runPythonScript, runShellCommand } from './python.js';
 import { groupSettings, groupSettingsSchema } from '../config/group.js';
 import { deliverMedia } from './media.js';
-import { requestsGroupStyleChange, requestsPersonaChange } from '../agent/persona-intent.js';
+import { requestsGroupStyleChange } from '../agent/persona-intent.js';
 export { workspaceFor } from '../storage/workspace.js';
 
 export interface ToolContext {
@@ -154,10 +154,6 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
       return {id,type,saved:true};
     }),{name:'remember_fact',description:'当前说话人明确要求记住时使用：self 保存该用户自己的长期事实，group 保存当前群或频道的共同约定。不得替其他人编造事实，普通用户不能以此授予自己创建者权限。',schema:z.object({type:z.enum(['self','group']),content:z.string().min(1).max(2000)})}));
     if (ctx.owner) {
-      tools.push(tool(wrap(async ({ value }: { value: string }) => {
-        if (!ctx.actorId || !ctx.store.memory.isOwner(ctx.scope,ctx.conversationId,ctx.actorId) || !ctx.currentRequest || !requestsPersonaChange(ctx.currentRequest)) throw new Error('只有已确认的创建者在当前消息明确要求修改人格时才能更改');
-        const changed=ctx.store.setPersona(value,'qq',ctx.actorId);return { saved: true, changed, effective: 'next turn' };
-      }), { name: 'owner_set_persona', description: '创建者专用：只有创建者在当前消息明确要求修改主人格时才使用；保存后下一回合生效。', schema: z.object({ value: z.string().min(1).max(30000) }) }));
       if (isCommunityScope(ctx.scope)) tools.push(tool(wrap(async ({ persona, keywords, enabled }: { persona?: string; keywords?: string[]; enabled?: boolean }) => {
         if (!ctx.actorId || !ctx.store.memory.isOwner(ctx.scope,ctx.conversationId,ctx.actorId)) throw new Error('只有已确认的创建者可以修改群设置');
         if (persona !== undefined && (!ctx.currentRequest || !requestsGroupStyleChange(ctx.currentRequest))) throw new Error('只有创建者在当前消息明确要求修改本群风格时才能更改');

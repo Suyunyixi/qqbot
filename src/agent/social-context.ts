@@ -1,5 +1,11 @@
 import type { MessageRow } from '../storage/store.js';
 
+/** Mark recent messages without duplicating the entire conversation in the prompt. */
+export function recentActivityMarker(timestamp: string, now: number, windowSeconds: number): string {
+  const age = now - Date.parse(timestamp);
+  return Number.isFinite(age) && age >= -60000 && age <= windowSeconds * 1000 ? '近期互动' : '';
+}
+
 /** Select a recent group conversation window without guessing who addressed the bot. */
 export function recentSocialContext(rows: MessageRow[], now: number, windowSeconds: number): string {
   const windowMs=windowSeconds*1000;

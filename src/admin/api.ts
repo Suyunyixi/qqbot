@@ -10,6 +10,7 @@ import { registeredPlugins, reloadPlugins } from '../tools/plugins.js';
 import { makeTools } from '../tools/registry.js';
 import { ReplyRuntime } from '../delivery/reply.js';
 import { TaskManager } from '../agent/task-manager.js';
+import { platformRoleFromRaw } from '../storage/memory.js';
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value));
@@ -46,17 +47,19 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
   try {
     if (req.method === 'GET' && url.pathname === '/api/conversations') {
       const rows = store.db.prepare(`SELECT conversation_id,scope,COUNT(*) AS message_count,MAX(timestamp) AS last_activity FROM messages GROUP BY conversation_id,scope ORDER BY MAX(seq) DESC LIMIT 500`).all() as Array<{conversation_id:string;scope:string;message_count:number;last_activity:string}>;
-      json(res, 200, { conversations: rows.map((row) => ({ ...row, settings: ['group','guild'].includes(row.scope) ? groupSettings(store, row.conversation_id) : undefined })) }); return;
+      const profile=store.db.prepare('SELECT label,note FROM conversation_profiles WHERE scope=? AND conversation_id=?');
+      json(res, 200, { conversations: rows.map((row) => { const saved=profile.get(row.scope,row.conversation_id) as {label:string;note:string}|undefined; const settings=['group','guild'].includes(row.scope) ? groupSettings(store,row.conversation_id) : undefined; return {...row,settings,label:settings ? settings.label : saved?.label || '',note:saved?.note || ''}; }) }); return;
     }
     if (req.method === 'GET' && url.pathname === '/api/messages') {
       const conversationId = id.parse(url.searchParams.get('conversationId'));
       const before = z.coerce.number().int().positive().parse(url.searchParams.get('before') ?? Number.MAX_SAFE_INTEGER);
       const query = z.string().max(200).parse(url.searchParams.get('q') ?? '');
-      const rows = store.db.prepare("SELECT seq,id,scope,sender_id,sender_name,content,timestamp,direction,attachments,is_mention,raw FROM messages WHERE conversation_id=? AND seq<? AND (instr(content,?)>0 OR instr(COALESCE(sender_name,''),?)>0) ORDER BY seq DESC LIMIT 101").all(conversationId,before,query,query) as Array<Record<string, unknown>>;
+      const rows = store.db.prepare("SELECT m.seq,m.id,m.scope,m.sender_id,m.sender_name,m.content,m.timestamp,m.direction,m.attachments,m.is_mention,m.raw,a.user_id,p.remark_name FROM messages m LEFT JOIN identity_aliases a ON a.scope=m.scope AND a.conversation_id=m.conversation_id AND a.external_id=m.sender_id LEFT JOIN conversation_member_profiles p ON p.scope=m.scope AND p.conversation_id=m.conversation_id AND p.external_id=m.sender_id WHERE m.conversation_id=? AND m.seq<? AND (instr(m.content,?)>0 OR instr(COALESCE(m.sender_name,''),?)>0 OR instr(COALESCE(p.remark_name,''),?)>0 OR instr(m.sender_id,?)>0) ORDER BY m.seq DESC LIMIT 101").all(conversationId,before,query,query,query,query) as Array<Record<string, unknown>>;
       const hasMore=rows.length>100; const page=rows.slice(0,100);
-      json(res, 200, { hasMore, nextBefore:hasMore ? page[page.length-1]?.seq : null, messages: page.reverse().map(({raw, ...row}) => { let eventType: unknown; try { eventType = typeof raw === 'string' ? (JSON.parse(raw) as {rawEventType?:unknown}).rawEventType : undefined; } catch { /* older record */ } return { ...row, eventType }; }) }); return;
+      const owner = store.memory.owner();
+      json(res, 200, { hasMore, nextBefore:hasMore ? page[page.length-1]?.seq : null, messages: page.reverse().map(({raw, ...row}) => { let eventType: unknown; let platformRole: string|undefined; try { if (typeof raw==='string') { const parsed=JSON.parse(raw) as {rawEventType?:unknown};eventType=parsed.rawEventType;if(row.scope==='group'||row.scope==='guild')platformRole=platformRoleFromRaw(parsed); } } catch { /* older record */ } return { ...row, eventType, platformRole, botRole: row.direction === 'out' ? 'bot' : row.user_id && row.user_id === owner ? 'owner' : 'ordinary' }; }) }); return;
     }
-    if (req.method === 'GET' && url.pathname === '/api/tools') { json(res, 200, { tools: Object.keys(toolPermissions).filter((name) => !name.startsWith('owner_')).sort() }); return; }
+    if (req.method === 'GET' && url.pathname === '/api/tools') { json(res, 200, { tools: Object.keys(toolPermissions).filter((name) => !name.startsWith('owner_')).sort(), requirements: toolPermissions }); return; }
     if (req.method === 'GET' && url.pathname === '/api/plugins') { json(res,200,{plugins:registeredPlugins().map((item)=>({name:item.name,permissions:item.permissions}))});return; }
     if (req.method === 'POST' && url.pathname === '/api/plugins/reload') {
       const items=await reloadPlugins(undefined,(candidates)=>{
@@ -69,7 +72,7 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
     if (req.method === 'GET' && url.pathname === '/api/qq-events') { json(res,200,{events:store.db.prepare('SELECT seq,event_type,payload,received_at FROM qq_events ORDER BY seq DESC LIMIT 100').all()});return; }
     if (req.method === 'GET' && url.pathname === '/api/runtime-config') {
       const config=readConfig(); const {apiKey,...model}=config.model;
-      json(res,200,{model,apiKeyConfigured:!!apiKey,memory:config.memory,tasks:config.tasks,tools:{search:config.tools.search,media:config.tools.media,python:config.tools.python}});return;
+      json(res,200,{model,apiKeyConfigured:!!apiKey,memory:config.memory,tasks:config.tasks,tools:{search:config.tools.search,media:config.tools.media,python:config.tools.python,voice:config.tools.voice},permissions:config.sandbox.permissions});return;
     }
     if (req.method === 'PUT' && url.pathname === '/api/runtime-config') {
       const input=runtimeOverrideSchema.parse(await body(req));
@@ -82,6 +85,23 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
       const input = z.object({ conversationId: id, settings: groupSettingsSchema }).parse(await body(req));
       if (!store.db.prepare("SELECT 1 FROM messages WHERE conversation_id=? AND scope IN ('group','guild') LIMIT 1").get(input.conversationId)) throw new Error('群聊或频道不存在');
       store.setSetting(input.conversationId, 'groupSettings', JSON.stringify(input.settings)); json(res, 200, { ok: true }); return;
+    }
+    if (url.pathname === '/api/conversation-profile' && req.method === 'PUT') {
+      const input=z.object({conversationId:id,scope:z.enum(['group','guild','c2c','dm']),label:z.string().trim().max(100),note:z.string().trim().max(2000)}).parse(await body(req));
+      if (!store.db.prepare('SELECT 1 FROM messages WHERE scope=? AND conversation_id=? LIMIT 1').get(input.scope,input.conversationId)) throw new Error('会话不存在');
+      store.db.transaction(()=>{
+        store.db.prepare(`INSERT INTO conversation_profiles VALUES (?,?,?,?,?) ON CONFLICT(scope,conversation_id) DO UPDATE SET label=excluded.label,note=excluded.note,updated_at=excluded.updated_at`).run(input.scope,input.conversationId,input.label,input.note,new Date().toISOString());
+        if (input.scope==='group' || input.scope==='guild') store.setSetting(input.conversationId,'groupSettings',JSON.stringify({...groupSettings(store,input.conversationId),label:input.label}));
+      })();json(res,200,{ok:true});return;
+    }
+    if (url.pathname === '/api/conversation-members' && req.method === 'GET') {
+      const conversationId=id.parse(url.searchParams.get('conversationId'));const scope=z.enum(['group','guild','c2c','dm']).parse(url.searchParams.get('scope'));
+      if (!store.db.prepare('SELECT 1 FROM messages WHERE scope=? AND conversation_id=? LIMIT 1').get(scope,conversationId)) throw new Error('会话不存在');
+      json(res,200,{scope,members:store.memory.listConversationMembers(scope,conversationId)});return;
+    }
+    if (url.pathname === '/api/conversation-members' && (req.method === 'PUT' || req.method === 'POST')) {
+      const input=z.object({conversationId:id,scope:z.enum(['group','guild','c2c','dm']),externalId:id,remarkName:z.string().trim().max(100),note:z.string().trim().max(2000)}).parse(await body(req));
+      store.memory.saveConversationMember(input.scope,input.conversationId,input.externalId,input.remarkName,input.note,req.method==='POST');json(res,200,{ok:true});return;
     }
     if (req.method === 'GET' && url.pathname === '/api/identities') { json(res, 200, { identities: store.memory.listIdentities(), owner: store.memory.owner() }); return; }
     if (req.method === 'POST' && url.pathname === '/api/identities/link') {

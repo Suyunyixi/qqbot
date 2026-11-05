@@ -407,12 +407,16 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     const harness = new Harness(store, { send: async (item) => { delivered.push(item); return { id: 'qq-1' }; } });
     const before = requests.length;
     await harness.receive(event({ id: 'old' }));
+    store.memory.saveConversationMember('group','group-a','user-a','小王备注','负责存储设备');
     expect(requests).toHaveLength(before);
     await harness.receive(event({ id: 'trigger', senderId: 'user-b', senderName: '小李', content: '小王买了什么？', isMention: true }));
     await vi.waitFor(() => expect(delivered.length).toBe(1), { timeout: 15000 });
     expect(delivered[0]?.content).toContain('NAS');
     expect(JSON.stringify(requests.at(-1)?.messages)).toContain('刚买了 NAS');
     expect(JSON.stringify(requests.at(-1)?.messages)).toContain('小王');
+    expect(JSON.stringify(requests.at(-1)?.messages)).toContain('小王备注');
+    expect(JSON.stringify(requests.at(-1)?.messages)).toContain('负责存储设备');
+    expect(JSON.stringify(requests.at(-1)?.messages)).toContain('近期互动');
     harness.stop(); store.close();
   }, 20000);
   it('需要最新排行时，模型不查来源就作答会被拦截并如实说明', async () => {

@@ -43,7 +43,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/qr.svg' && status.qrUrl) { res.writeHead(200, { 'Content-Type': 'image/svg+xml' }); res.end(await QRCode.toString(status.qrUrl, { type: 'svg', margin: 2 })); return; }
   if (pathname === '/api/persona') { await handlePersona(req, res, store); return; }
   if (pathname.startsWith('/api/')) { await handleAdmin(req, res, store, harness); return; }
-  if (pathname === '/admin.js' || pathname === '/admin.css') {
+  if (pathname === '/admin.js' || pathname === '/admin.css' || pathname === '/tools.js') {
     res.writeHead(200, { 'Content-Type': pathname.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8', 'X-Content-Type-Options': 'nosniff' });
     res.end(fs.readFileSync(path.join(adminDir, path.basename(pathname)))); return;
   }

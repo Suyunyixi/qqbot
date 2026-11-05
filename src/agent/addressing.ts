@@ -5,7 +5,7 @@ export function requestedRecipient(content: string, actorId: string, aliases: Id
   if (!/(?:问问|问一下|问下|请|找|叫|让|提醒|通知|咨询)/.test(content)) return undefined;
   const text = content.toLocaleLowerCase();
   const matches = aliases.filter((alias) => alias.external_id !== actorId && alias.display_name && alias.display_name.trim().length >= 2 && text.includes(alias.display_name.trim().toLocaleLowerCase()));
-  return matches.length === 1 ? matches[0] : undefined;
+  return new Set(matches.map((match) => match.external_id)).size === 1 ? matches[0] : undefined;
 }
 
 /** Turn a textual request to a known recipient into an actual QQ mention. */

@@ -17,13 +17,24 @@ const { workspaceFor } = await import('../src/storage/workspace.js');
 const { handleAdmin } = await import('../src/admin/api.js');
 const { searchWeb } = await import('../src/tools/search.js');
 const { recentSocialContext } = await import('../src/agent/social-context.js');
+const { recentActivityMarker } = await import('../src/agent/social-context.js');
 const { hasEvidence, needsCurrentResearch } = await import('../src/agent/research-gate.js');
 function event(group:string,user:string,id:string): InboundEvent { return { id,conversationId:group,scope:'group',senderId:user,senderName:user,content:'消息',timestamp:new Date().toISOString(),isMention:false,attachments:[] }; }
 
 describe('全局用户记忆和创建者权限', () => {
+  it('保存平台最后一次提供的群角色，缺少角色的消息不会覆盖，群主不自动取得机器人权限', () => {
+    const store=new Store(':memory:');
+    store.record({...event('g','u','one'),raw:{raw:{author:{member_role:'member'}}}});
+    store.record({...event('g','u','two'),raw:{raw:{author:{member_role:'owner'}}}});
+    store.record({...event('g','u','three'),raw:{raw:{author:{}}}});
+    expect(store.memory.listConversationMembers('group','g')[0]).toMatchObject({platform_role:'owner',bot_role:'ordinary',message_count:3});
+    expect(store.memory.isOwner('group','g','u')).toBe(false);store.close();
+  });
   it('只突出指定时间窗口里的群友发言，并保留发言人和时间', () => {
     const now=Date.now();const rows=[{seq:1,id:'old',sender_id:'a',sender_name:'小王',content:'久远聊天',timestamp:new Date(now-600000).toISOString(),direction:'in',attachments:'[]'},{seq:2,id:'new',sender_id:'b',sender_name:'小李',content:'最近的纠正',timestamp:new Date(now-15000).toISOString(),direction:'in',attachments:'[]'}];
     const text=recentSocialContext(rows,now,180);expect(text).toContain('小李');expect(text).toContain('最近的纠正');expect(text).not.toContain('久远聊天');
+    expect(recentActivityMarker(rows[1]!.timestamp,now,10)).toBe('');
+    expect(recentActivityMarker(rows[1]!.timestamp,now,20)).toBe('近期互动');
   });
   it('同一用户跨群共享用户记忆，群记忆只在所属群可见', () => {
     const store=new Store(':memory:');store.record(event('group-a','member-a','1'));store.record(event('group-b','member-a','2'));store.record(event('group-b','member-b','3'));
@@ -87,6 +98,45 @@ describe('全局用户记忆和创建者权限', () => {
 });
 
 describe('管理页面接口', () => {
+  it('群聊和私聊独立维护会话与成员备注，原始消息及创建者权限不受影响', async () => {
+    const store=new Store(':memory:');store.record({...event('group','member-openid','msg-group'),senderName:'平台昵称',content:'原始消息',raw:{raw:{author:{member_role:'admin'}}}});
+    store.record({...event('private','private-openid','msg-private'),scope:'c2c',senderName:'私聊昵称',content:'私聊内容'});
+    const server=http.createServer((req,res)=>void handleAdmin(req,res,store,undefined));await new Promise<void>((resolve)=>server.listen(0,'127.0.0.1',resolve));
+    const address=server.address();if(!address||typeof address==='string')throw Error('listen');const origin=`http://127.0.0.1:${address.port}`;
+    const write=(url:string,method:string,value:unknown)=>fetch(origin+url,{method,headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify(value)});
+    try {
+      expect((await write('/api/conversation-profile','PUT',{scope:'group',conversationId:'group',label:'工作群',note:'群备注'})).status).toBe(200);
+      expect((await write('/api/conversation-profile','PUT',{scope:'c2c',conversationId:'private',label:'朋友私聊',note:'私聊备注'})).status).toBe(200);
+      expect((await write('/api/conversation-members','PUT',{scope:'group',conversationId:'group',externalId:'member-openid',remarkName:'小王',note:'人工备注'})).status).toBe(200);
+      expect((await write('/api/conversation-members','POST',{scope:'c2c',conversationId:'private',externalId:'manual-openid',remarkName:'手工用户',note:'待核实'})).status).toBe(200);
+      expect((await write('/api/conversation-members','PUT',{scope:'group',conversationId:'group',externalId:'unknown',remarkName:'不应创建',note:''})).status).toBe(400);
+      const all=await (await fetch(origin+'/api/conversations')).json() as {conversations:Array<{scope:string;label:string;note:string}>};
+      expect(all.conversations.find((c)=>c.scope==='group')).toMatchObject({label:'工作群',note:'群备注'});
+      expect(all.conversations.find((c)=>c.scope==='c2c')).toMatchObject({label:'朋友私聊',note:'私聊备注'});
+      const group=await (await fetch(origin+'/api/conversation-members?scope=group&conversationId=group')).json() as {members:Array<{external_id:string;remark_name:string;note:string;bot_role:string}>};
+      expect(group.members).toHaveLength(1);expect(group.members[0]).toMatchObject({external_id:'member-openid',remark_name:'小王',note:'人工备注',bot_role:'ordinary',platform_role:'admin'});
+      const privateMembers=await (await fetch(origin+'/api/conversation-members?scope=c2c&conversationId=private')).json() as {members:Array<{external_id:string;bot_role:string}>};
+      expect(privateMembers.members.map((m)=>m.external_id)).toContain('manual-openid');expect(privateMembers.members.every((m)=>m.bot_role==='ordinary')).toBe(true);
+      const result=await (await fetch(origin+'/api/messages?conversationId=group&q='+encodeURIComponent('小王'))).json() as {messages:Array<{id:string;sender_id:string;sender_name:string;remark_name:string;content:string;botRole:string}>};
+      expect(result.messages[0]).toMatchObject({id:'msg-group',sender_id:'member-openid',sender_name:'平台昵称',remark_name:'小王',content:'原始消息',botRole:'ordinary',platformRole:'admin'});
+      expect(store.memory.owner()).toBeUndefined();
+      store.memory.setOwner(store.memory.lookup('group','group','member-openid')!);
+      const updated=await (await fetch(origin+'/api/conversation-members?scope=group&conversationId=group')).json() as {members:Array<{external_id:string;bot_role:string}>};
+      expect(updated.members[0]).toMatchObject({external_id:'member-openid',bot_role:'owner'});
+    } finally {await new Promise<void>((resolve)=>server.close(()=>resolve()));store.close();}
+  });
+  it('会话和成员的人工备注与聊天原文在数据库重开后保留', () => {
+    const file=path.join(fs.mkdtempSync(path.join(os.tmpdir(),'qq-member-persistence-')),'records.sqlite');
+    const initial=new Store(file);initial.record({...event('g','u','m'),content:'原文',raw:{raw:{author:{member_role:'owner'}}}});
+    initial.memory.saveConversationMember('group','g','u','人工名称','人工备注');
+    initial.db.prepare('INSERT INTO conversation_profiles VALUES (?,?,?,?,?)').run('group','g','本地名称','本地说明',new Date().toISOString());
+    // Simulate upgrading an older database whose raw events predate this index.
+    initial.db.prepare('DELETE FROM conversation_member_platform_roles').run();initial.db.prepare("DELETE FROM app_settings WHERE key='member_platform_roles_migrated_v1'").run();initial.close();
+    const reopened=new Store(file);
+    expect(reopened.memory.listConversationMembers('group','g')[0]).toMatchObject({external_id:'u',remark_name:'人工名称',note:'人工备注',platform_role:'owner',bot_role:'ordinary'});
+    expect(reopened.db.prepare('SELECT label,note FROM conversation_profiles WHERE scope=? AND conversation_id=?').get('group','g')).toEqual({label:'本地名称',note:'本地说明'});
+    expect(reopened.recent('g',10)[0]?.content).toBe('原文');reopened.close();
+  });
   it('展示并动态修改群配置和记忆，拒绝跨站写入', async () => {
     const store=new Store(':memory:');store.record(event('g','u','1'));
     const server=http.createServer((req,res)=>void handleAdmin(req,res,store,undefined));await new Promise<void>((resolve)=>server.listen(0,'127.0.0.1',resolve));

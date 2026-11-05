@@ -5,6 +5,13 @@ import { isCommunityScope, type Scope } from '../domain/types.js';
 export type SubjectType = 'user' | 'group';
 export interface MemoryEntry { id: string; subject_type: SubjectType; subject_id: string; content: string; source_conversation_id: string; source_start: number | null; source_end: number | null; created_at: string; updated_at: string }
 export interface IdentityAlias { scope: Scope; conversation_id: string; external_id: string; user_id: string; display_name: string | null }
+export type PlatformMemberRole = 'owner' | 'admin' | 'member';
+export function platformRoleFromRaw(raw: unknown): PlatformMemberRole | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const event=raw as {raw?:{author?:{member_role?:unknown}};author?:{member_role?:unknown}};
+  const value=event.raw?.author?.member_role ?? event.author?.member_role;
+  return value==='owner' || value==='admin' || value==='member' ? value : undefined;
+}
 
 /** User identities are separate from group facts; aliases can be linked explicitly. */
 export class MemoryRepository {
@@ -16,6 +23,16 @@ export class MemoryRepository {
         PRIMARY KEY(scope, conversation_id, external_id)
       );
       CREATE INDEX IF NOT EXISTS identity_user ON identity_aliases(user_id);
+      CREATE TABLE IF NOT EXISTS conversation_member_profiles (
+        scope TEXT NOT NULL, conversation_id TEXT NOT NULL, external_id TEXT NOT NULL,
+        remark_name TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+        PRIMARY KEY(scope,conversation_id,external_id)
+      );
+      CREATE TABLE IF NOT EXISTS conversation_member_platform_roles (
+        scope TEXT NOT NULL, conversation_id TEXT NOT NULL, external_id TEXT NOT NULL,
+        platform_role TEXT NOT NULL, source_seq INTEGER NOT NULL, observed_at TEXT NOT NULL,
+        PRIMARY KEY(scope,conversation_id,external_id)
+      );
       CREATE TABLE IF NOT EXISTS subject_memories (
         id TEXT PRIMARY KEY, subject_type TEXT NOT NULL CHECK(subject_type IN ('user','group')),
         subject_id TEXT NOT NULL, content TEXT NOT NULL, source_conversation_id TEXT NOT NULL,
@@ -28,6 +45,17 @@ export class MemoryRepository {
     `);
     const prior = db.prepare("SELECT DISTINCT scope,conversation_id,sender_id,sender_name FROM messages WHERE direction='in'").all() as Array<{scope: Scope; conversation_id: string; sender_id: string; sender_name: string | null}>;
     for (const row of prior) this.observe(row.scope, row.conversation_id, row.sender_id, row.sender_name ?? undefined);
+    if (!db.prepare("SELECT 1 FROM app_settings WHERE key='member_platform_roles_migrated_v1'").get()) db.transaction(() => {
+      const select=db.prepare("SELECT seq,scope,conversation_id,sender_id,raw,timestamp FROM messages WHERE direction='in' AND scope IN ('group','guild') AND raw IS NOT NULL AND seq>? ORDER BY seq LIMIT 100");
+      let after=0;
+      while (true) {
+        const rows=select.all(after) as Array<{seq:number;scope:Scope;conversation_id:string;sender_id:string;raw:string;timestamp:string}>;
+        if (!rows.length) break;
+        for (const row of rows) { let raw:unknown;try { raw=JSON.parse(row.raw); } catch { continue; } this.observePlatformRole(row.scope,row.conversation_id,row.sender_id,raw,row.seq,row.timestamp); }
+        after=rows[rows.length-1]!.seq;
+      }
+      db.prepare("INSERT INTO app_settings VALUES ('member_platform_roles_migrated_v1','1',?)").run(new Date().toISOString());
+    })();
     // Repair earlier migrations that treated an unresolved person as a group.
     // The original legacy row is deliberately retained for future review.
     db.prepare(`DELETE FROM subject_memories WHERE subject_type='group' AND id IN
@@ -61,6 +89,31 @@ export class MemoryRepository {
   }
   listIdentities(): IdentityAlias[] {
     return this.db.prepare('SELECT scope,conversation_id,external_id,user_id,display_name FROM identity_aliases ORDER BY updated_at DESC LIMIT 1000').all() as IdentityAlias[];
+  }
+  observePlatformRole(scope: Scope, conversationId: string, externalId: string, raw: unknown, seq: number, timestamp: string): void {
+    if (!isCommunityScope(scope)) return;
+    const role=platformRoleFromRaw(raw);if (!role) return;
+    this.db.prepare(`INSERT INTO conversation_member_platform_roles VALUES (?,?,?,?,?,?) ON CONFLICT(scope,conversation_id,external_id) DO UPDATE SET platform_role=excluded.platform_role,source_seq=excluded.source_seq,observed_at=excluded.observed_at WHERE excluded.source_seq>conversation_member_platform_roles.source_seq`).run(scope,conversationId,externalId,role,seq,timestamp);
+  }
+  listConversationMembers(scope: Scope, conversationId: string): ConversationMember[] {
+    return this.db.prepare(`SELECT a.scope,a.conversation_id,a.external_id,a.user_id,a.display_name,
+      COALESCE(p.remark_name,'') AS remark_name,COALESCE(p.note,'') AS note,
+      COUNT(m.seq) AS message_count,MIN(m.timestamp) AS first_message,MAX(m.timestamp) AS last_message,r.platform_role,r.observed_at AS platform_role_at,
+      CASE WHEN a.user_id=? THEN 'owner' ELSE 'ordinary' END AS bot_role
+      FROM identity_aliases a LEFT JOIN conversation_member_profiles p ON p.scope=a.scope AND p.conversation_id=a.conversation_id AND p.external_id=a.external_id
+      LEFT JOIN conversation_member_platform_roles r ON r.scope=a.scope AND r.conversation_id=a.conversation_id AND r.external_id=a.external_id
+      LEFT JOIN messages m ON m.scope=a.scope AND m.conversation_id=a.conversation_id AND m.sender_id=a.external_id AND m.direction='in'
+      WHERE a.scope=? AND a.conversation_id=? GROUP BY a.scope,a.conversation_id,a.external_id ORDER BY last_message DESC,a.external_id`).all(this.owner() ?? '',scope,conversationId) as ConversationMember[];
+  }
+  saveConversationMember(scope: Scope, conversationId: string, externalId: string, remarkName: string, note: string, create = false): void {
+    this.db.transaction(() => {
+      if (!this.db.prepare("SELECT 1 FROM messages WHERE scope=? AND conversation_id=? LIMIT 1").get(scope,conversationId)) throw new Error('会话不存在');
+      if (!this.lookup(scope,conversationId,externalId)) {
+        if (!create) throw new Error('会话成员不存在');
+        this.observe(scope,conversationId,externalId);
+      }
+      this.db.prepare(`INSERT INTO conversation_member_profiles VALUES (?,?,?,?,?,?) ON CONFLICT(scope,conversation_id,external_id) DO UPDATE SET remark_name=excluded.remark_name,note=excluded.note,updated_at=excluded.updated_at`).run(scope,conversationId,externalId,remarkName,note,new Date().toISOString());
+    })();
   }
   link(source: string, target: string): void {
     if (source === target) throw new Error('请选择两个不同的用户身份');
@@ -136,3 +189,4 @@ export class MemoryRepository {
     return [...group, ...users].slice(0, 60);
   }
 }
+export interface ConversationMember extends IdentityAlias { remark_name: string; note: string; message_count: number; first_message: string | null; last_message: string | null; bot_role: 'owner' | 'ordinary'; platform_role: PlatformMemberRole | null; platform_role_at: string | null }

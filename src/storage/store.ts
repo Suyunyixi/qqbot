@@ -44,6 +44,10 @@ export class Store {
         conversation_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
         PRIMARY KEY(conversation_id, key)
       );
+      CREATE TABLE IF NOT EXISTS conversation_profiles (
+        scope TEXT NOT NULL, conversation_id TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL, PRIMARY KEY(scope,conversation_id)
+      );
       CREATE TABLE IF NOT EXISTS app_settings (
         key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
       );
@@ -94,9 +98,10 @@ export class Store {
   }
   record(event: InboundEvent): boolean {
     return this.db.transaction(() => {
-      const created = this.db.prepare(`INSERT OR IGNORE INTO messages (id,conversation_id,scope,sender_id,sender_name,content,timestamp,direction,attachments,raw,is_mention) VALUES (?,?,?,?,?,?,?,'in',?,?,?)`)
-        .run(event.id, event.conversationId, event.scope, event.senderId, event.senderName ?? null, event.content, event.timestamp, JSON.stringify(event.attachments), event.raw === undefined ? null : JSON.stringify(event.raw), Number(event.isMention)).changes > 0;
-      if (created) this.memory.observe(event.scope, event.conversationId, event.senderId, event.senderName);
+      const result = this.db.prepare(`INSERT OR IGNORE INTO messages (id,conversation_id,scope,sender_id,sender_name,content,timestamp,direction,attachments,raw,is_mention) VALUES (?,?,?,?,?,?,?,'in',?,?,?)`)
+        .run(event.id, event.conversationId, event.scope, event.senderId, event.senderName ?? null, event.content, event.timestamp, JSON.stringify(event.attachments), event.raw === undefined ? null : JSON.stringify(event.raw), Number(event.isMention));
+      const created = result.changes > 0;
+      if (created) { this.memory.observe(event.scope, event.conversationId, event.senderId, event.senderName); this.memory.observePlatformRole(event.scope,event.conversationId,event.senderId,event.raw,Number(result.lastInsertRowid),event.timestamp); }
       return created;
     })();
   }

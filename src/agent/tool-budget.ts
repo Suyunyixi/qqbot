@@ -5,8 +5,10 @@ import { createMiddleware } from 'langchain';
 export function toolBudget(background: boolean) {
   let calls = 0;
   let warned = false;
-  const soft = background ? 45 : 16;
-  const hard = background ? 65 : 28;
+  // A foreground tool round consumes several graph steps. Keep its hard
+  // budget below the graph recursion limit, so we can stop gracefully.
+  const soft = background ? 45 : 8;
+  const hard = background ? 65 : 12;
   return createMiddleware({
     name: 'ToolBudget',
     beforeModel: { canJumpTo: ['end'], hook: () => {

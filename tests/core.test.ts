@@ -5,6 +5,8 @@ import path from 'node:path';
 import http from 'node:http';
 import { tool } from 'langchain';
 import { z } from 'zod';
+import { HumanMessage } from '@langchain/core/messages';
+import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-harness-test-'));
@@ -12,7 +14,7 @@ process.env.BOT_DATA_DIR = root;
 process.env.MODEL_API_KEY = 'test-key';
 process.env.MODEL_NAME = 'test-model';
 
-const { initConfig, readConfig, configPath } = await import('../src/config/settings.js');
+const { initConfig, readConfig, configPath, checkpointPath } = await import('../src/config/settings.js');
 const { Store } = await import('../src/storage/store.js');
 const { Harness } = await import('../src/agent/harness.js');
 const { AgentRuntime } = await import('../src/agent/runtime.js');
@@ -362,7 +364,8 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
           return;
         }
         let reply: Record<string, unknown>;
-        if (allText.includes('复核期间插话测试') && allText.includes('插话发生在复核期间')) reply={role:'assistant',content:'已考虑复核期间的插话'};
+        if (allText.includes('工具死循环模拟')) reply={role:'assistant',content:null,tool_calls:[{id:`loop-${requests.length}`,type:'function',function:{name:'sandbox_capabilities',arguments:'{}'}}]};
+        else if (allText.includes('复核期间插话测试') && allText.includes('插话发生在复核期间')) reply={role:'assistant',content:'已考虑复核期间的插话'};
         else if (allText.includes('复核期间插话测试')) reply={role:'assistant',content:'最初草稿'};
         else if (allText.includes('无关插话复核测试') && allText.includes('上一条只是尚未发送')) reply={role:'assistant',content:'7 加 5 等于 12。'};
         else if (allText.includes('无关插话复核测试')) reply={role:'assistant',content:'7 加 5 等于 12。乙，你去哪里旅游？'};
@@ -456,6 +459,35 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(system).toContain('持续生效的核心人格');expect(system).not.toContain('负责存储设备');expect(user).toContain('负责存储设备');
     harness.stop(); store.close();
   }, 20000);
+  it('前台工具循环在递归上限之前停止并说明情况', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
+    const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'loop-response'}}});
+    const before=requests.length;
+    await harness.receive(event({id:'loop',conversationId:'group-tool-loop',content:'工具死循环模拟',isMention:true}));
+    await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+    expect(delivered[0]?.content).toContain('步骤过多');
+    expect(requests.length-before).toBeLessThanOrEqual(12);
+    harness.stop();store.close();
+  },20000);
+  it('旧摘要的截断位置不会裁掉新一轮用户消息', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
+    const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:`stale-${delivered.length}`}}});
+    await harness.receive(event({id:'stale-first',conversationId:'group-stale-summary',content:'第一轮',isMention:true}));
+    await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+    const saver=SqliteSaver.fromConnString(checkpointPath);
+    const tuple=await saver.getTuple({configurable:{thread_id:'group:group-stale-summary'}});
+    expect(tuple).toBeDefined();
+    tuple!.checkpoint.channel_values._summarizationEvent={cutoffIndex:153,summaryMessage:new HumanMessage('过期的旧摘要'),filePath:'/conversation_history/old.md'};
+    tuple!.checkpoint.channel_versions._summarizationEvent=tuple!.checkpoint.channel_versions.messages!;
+    await saver.put(tuple!.config,tuple!.checkpoint,tuple!.metadata!);
+    const before=requests.length;
+    await harness.receive(event({id:'stale-second',conversationId:'group-stale-summary',content:'这是新一轮真实请求',isMention:true}));
+    await vi.waitFor(()=>expect(delivered.length).toBe(2),{timeout:15000});
+    const main=requests.slice(before).find((request)=>!JSON.stringify(request.messages).includes('群聊答复语义复核器'));
+    expect(JSON.stringify(main?.messages)).toContain('这是新一轮真实请求');
+    expect(JSON.stringify(main?.messages)).not.toContain('过期的旧摘要');
+    harness.stop();store.close();
+  },20000);
   it('单独 @ 唤醒时把此前连续发言作为同一段对话，同时保留不同发言人', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
     const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'focus-response'}}});
@@ -470,7 +502,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     await harness.receive(event({id:'focus-trigger',conversationId:'group-focus',senderId:'user-a',senderName:'甲',content:'<@bot>',isMention:true,timestamp:at(4000)}));
     await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
     const messages=requests.slice(before).find((request)=>!JSON.stringify(request.messages).includes('群聊答复语义复核器'))?.messages as Array<{role:string;content:unknown}>;
-    const content=String(messages.find((message)=>message.role==='user')?.content);
+    const content=String(messages.find((message)=>message.role==='user' && String(message.content).includes('本轮附近的连续对话'))?.content);
     const focus=content.split('本轮附近的连续对话')[1]!.split('当前请求：')[0]!;
     expect(focus).toContain('上一轮已经回答');expect(focus).toContain('甲 [user-a]：你就是大肥鱼啊');expect(focus).toContain('乙 [user-b]：另一位群友插话');expect(focus).toContain('甲 [user-a]：你不信问问其他人');
     expect(focus).not.toContain('之前已经结束的讨论');expect(content).toContain('这次只有 @ 没有附带文字');

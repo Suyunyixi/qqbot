@@ -24,6 +24,7 @@ let startedTasks = false;
 let checksReady = false;
 function refreshConnectionState(): void {
   if (!adapter || !harness) return;
+  if (status.qqConnected) for (const check of status.checks) if (!check.ok) void harness.balanceAlert.report(check.message);
   status.phase = status.qqConnected ? (checksReady ? 'ready' : 'checking') : 'connecting';
   if (status.qqConnected && checksReady) {
     if (!startedTasks) { startedTasks = true; harness.start(); }
@@ -64,6 +65,10 @@ async function main(): Promise<void> {
     for (;;) {
       const checks = await doctor(store).catch((error: unknown): Check[] => [{ name: '启动检查', ok: false, message: error instanceof Error ? error.message : String(error) }]);
       status.checks = checks;
+      if (status.qqConnected && harness) {
+        for (const check of checks) if (!check.ok) void harness.balanceAlert.report(check.message);
+        if (checks.some((check)=>check.name==='模型与工具调用' && check.ok)) harness.balanceAlert.recovered();
+      }
       for (const check of checks) console.log(`[${check.ok ? '通过' : '失败'}] ${check.name}: ${check.message}`);
       if (checks.every((check) => check.ok)) { status.error = undefined; return; }
       status.error = '启动自检未通过，修复依赖后将自动重试';

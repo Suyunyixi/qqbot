@@ -24,9 +24,26 @@ const { quotedMessage } = await import('../src/agent/quoted-message.js');
 const { internalSubagentTools } = await import('../src/agent/subagent-policy.js');
 const { conversationFocus, formatConversationFocus } = await import('../src/agent/conversation-focus.js');
 const { conversationReview } = await import('../src/agent/conversation-review.js');
+const { BalanceAlert, isBalanceError } = await import('../src/agent/balance-alert.js');
 function event(group:string,user:string,id:string): InboundEvent { return { id,conversationId:group,scope:'group',senderId:user,senderName:user,content:'消息',timestamp:new Date().toISOString(),isMention:false,attachments:[] }; }
 
 describe('全局用户记忆和创建者权限', () => {
+  it('余额不足提醒创建者并去重，其他故障不误报，恢复后可再次提醒', async () => {
+    const store=new Store(':memory:');store.record(event('g','owner','1'));store.memory.setOwner(store.memory.lookup('group','g','owner')!);
+    const sent:Array<{scope:string;content:string}>=[];const reply=new ReplyRuntime(store,{send:async(item)=>{sent.push(item);return {id:`alert-${sent.length}`}}});
+    const alert=new BalanceAlert(store,reply);const balance=new Error('402 Insufficient Balance');
+    expect(isBalanceError(balance)).toBe(true);expect(isBalanceError(new Error('402 unrelated billing issue'))).toBe(false);expect(isBalanceError(new Error('500 error'))).toBe(false);
+    await alert.report(new Error('500 error'));expect(sent).toHaveLength(0);
+    await Promise.all([alert.report(balance),alert.report(balance)]);expect(sent).toHaveLength(1);expect(sent[0]).toMatchObject({scope:'group',content:'<@owner> 主人没饭饭吃了~呜呜'});
+    await new BalanceAlert(store,reply).report(balance);expect(sent).toHaveLength(1);
+    alert.recovered();await alert.report(balance);expect(sent).toHaveLength(2);store.close();
+  });
+  it('有创建者私聊身份时优先私聊，发送超时不会自动重复', async () => {
+    const store=new Store(':memory:');store.saveQQCredentials({appId:'a',appSecret:'s',userOpenid:'owner-c2c'});
+    const sent:string[]=[];const reply=new ReplyRuntime(store,{send:async(item)=>{sent.push(`${item.scope}:${item.content}`);throw Error('timeout')}});
+    const alert=new BalanceAlert(store,reply);await alert.report(new Error('402 Insufficient Balance'));await new BalanceAlert(store,reply).report(new Error('402 Insufficient Balance'));
+    expect(sent).toEqual(['c2c:主人没饭饭吃了~呜呜']);store.close();
+  });
   it('语义复核识别待检查遗漏，超时或返回异常时不阻止原回复', async () => {
     const rows=[{seq:1,id:'1',sender_id:'u',sender_name:'甲',content:'请问问大家',timestamp:new Date().toISOString(),direction:'in',attachments:'[]'}];
     const missing={invoke:async()=>({content:'{"needsRevision":true,"reason":"只表示会问，没有提出问题"}'})};

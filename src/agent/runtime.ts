@@ -51,7 +51,7 @@ function contentText(content: unknown): string {
 export class AgentRuntime {
   private readonly checkpointer: SqliteSaver;
   private readonly memoryUpdates = new Set<string>();
-  constructor(private readonly store: Store) { this.checkpointer = SqliteSaver.fromConnString(checkpointPath); }
+  constructor(private readonly store: Store, private readonly onModelError?: (error:unknown)=>void) { this.checkpointer = SqliteSaver.fromConnString(checkpointPath); }
 
   async respond(ctx: ToolContext, event: InboundEvent, systemEvent = false): Promise<void> {
     ctx.currentRequest = systemEvent ? undefined : event.content;
@@ -203,7 +203,7 @@ ${persona(this.store)}
     if (this.memoryUpdates.has(conversationId)) return;
     this.memoryUpdates.add(conversationId);
     void this.updateMemory(conversationId, through)
-      .catch((error: unknown) => console.error('记忆整理失败，仍保留原始记录：', error instanceof Error ? error.message : error))
+      .catch((error: unknown) => {this.onModelError?.(error);console.error('记忆整理失败，仍保留原始记录：', error instanceof Error ? error.message : error);})
       .finally(() => this.memoryUpdates.delete(conversationId));
   }
 

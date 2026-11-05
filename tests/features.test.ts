@@ -23,9 +23,39 @@ const { capabilityManifest } = await import('../src/agent/capabilities.js');
 const { quotedMessage } = await import('../src/agent/quoted-message.js');
 const { requestsPersonaChange } = await import('../src/agent/persona-intent.js');
 const { internalSubagentTools } = await import('../src/agent/subagent-policy.js');
+const { conversationFocus, formatConversationFocus } = await import('../src/agent/conversation-focus.js');
+const { conversationReview } = await import('../src/agent/conversation-review.js');
 function event(group:string,user:string,id:string): InboundEvent { return { id,conversationId:group,scope:'group',senderId:user,senderName:user,content:'消息',timestamp:new Date().toISOString(),isMention:false,attachments:[] }; }
 
 describe('全局用户记忆和创建者权限', () => {
+  it('语义复核识别待检查遗漏，超时或返回异常时不阻止原回复', async () => {
+    const rows=[{seq:1,id:'1',sender_id:'u',sender_name:'甲',content:'请问问大家',timestamp:new Date().toISOString(),direction:'in',attachments:'[]'}];
+    const missing={invoke:async()=>({content:'{"needsRevision":true,"reason":"只表示会问，没有提出问题"}'})};
+    expect(await conversationReview(missing,rows,'u','<@bot>','我会问问')).toBe('只表示会问，没有提出问题');
+    const invalid={invoke:async()=>({content:'不是可解析的复核结果'})};
+    expect(await conversationReview(invalid,rows,'u','<@bot>','正常回复')).toBeUndefined();
+    const failed={invoke:async()=>{throw Error('服务不可用')}};
+    expect(await conversationReview(failed,rows,'u','<@bot>','正常回复')).toBeUndefined();
+  });
+  it('单独 @ 时突出最近连续对话，保留发言人和上一条机器人回复', () => {
+    const now=Date.now();
+    const row=(seq:number,sender_id:string,sender_name:string,content:string,direction='in',age=0)=>({seq,id:`r${seq}`,sender_id,sender_name,content,timestamp:new Date(now-age).toISOString(),direction,attachments:'[]'});
+    const rows=[row(1,'a','甲','之前的话','in',60000),row(2,'bot','机器人','原来的回复','out',30000),row(3,'a','甲','你就是大肥鱼啊','in',20000),row(4,'b','乙','另一个人插话','in',15000),row(5,'a','甲','你不信问问其他人','in',10000)];
+    const trigger={...event('g','a','trigger'),timestamp:new Date(now).toISOString(),content:'<@bot>',isMention:true};
+    const focus=conversationFocus(rows,trigger,180);
+    expect(focus.mentionOnly).toBe(true);expect(focus.rows.map((r)=>r.seq)).toEqual([2,3,4,5]);expect(focus.background.map((r)=>r.seq)).toEqual([1]);
+    const rendered=formatConversationFocus(focus.rows);
+    expect(rendered).toContain('甲 [a]：你就是大肥鱼啊');expect(rendered).toContain('乙 [b]：另一个人插话');expect(rendered).toContain('甲 [a]：你不信问问其他人');
+    expect(conversationFocus(rows,{...trigger,content:'<@bot> 说说别的'},180).mentionOnly).toBe(false);
+  });
+  it('不把过期发言和上一轮已答复的消息判为本轮连续对话', () => {
+    const now=Date.now();const row=(seq:number,direction:string,age:number)=>({seq,id:`r${seq}`,sender_id:direction==='out'?'bot':'u',sender_name:'用户',content:`记录${seq}`,timestamp:new Date(now-age).toISOString(),direction,attachments:'[]'});
+    const trigger={...event('g','u','trigger'),timestamp:new Date(now).toISOString(),content:'<@bot>',isMention:true};
+    const stale=conversationFocus([row(1,'out',300000),row(2,'in',200000)],trigger,180);
+    expect(stale.rows).toEqual([]);expect(stale.background).toHaveLength(2);
+    const answered=conversationFocus([row(1,'in',30000),row(2,'out',20000),row(3,'in',10000)],trigger,180);
+    expect(answered.rows.map((r)=>r.seq)).toEqual([2,3]);expect(answered.background.map((r)=>r.seq)).toEqual([1]);
+  });
   it('引用消息作为上下文单独提取，并忽略普通消息片段', () => {
     const raw={refMsgIdx:'quoted',msgElements:[{message_type:103,msg_idx:'quoted',content:'我可以下载文件'},{message_type:0,content:'不是引用'}]};
     expect(quotedMessage(raw)).toBe('我可以下载文件');

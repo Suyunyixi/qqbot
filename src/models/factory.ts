@@ -5,13 +5,17 @@ import { ChatAnthropic } from '@langchain/anthropic';
 import { readConfig } from '../config/settings.js';
 
 /** Build a fresh model so edited configuration takes effect on the next run. */
-export function makeModel(): ChatOpenAI | ChatAnthropic {
+export function makeModel(options: { lightweightReview?: boolean } = {}): ChatOpenAI | ChatAnthropic {
   const config = readConfig();
   if (config.model.provider === 'anthropic') {
     class ContextBoundAnthropic extends ChatAnthropic {
       override get profile() { return { ...super.profile, maxInputTokens: config.model.contextTokens }; }
     }
-    return new ContextBoundAnthropic({ model: config.model.name, apiKey: config.model.apiKey, maxTokens: 4096, maxRetries: 1, clientOptions: { baseURL: config.model.baseUrl, timeout: config.model.timeoutMs } });
+    // The main conversation keeps the provider's configured thinking mode.
+    // A small semantic review on DeepSeek's official endpoint uses a short,
+    // non-thinking request to avoid doubling interactive response latency.
+    const quickReview = options.lightweightReview && new URL(config.model.baseUrl).hostname === 'api.deepseek.com';
+    return new ContextBoundAnthropic({ model: config.model.name, apiKey: config.model.apiKey, maxTokens: quickReview ? 512 : 4096, ...(quickReview ? { thinking: { type: 'disabled' as const } } : {}), maxRetries: quickReview ? 0 : 1, clientOptions: { baseURL: config.model.baseUrl, timeout: config.model.timeoutMs } });
   }
 
   // DeepSeek's OpenAI-compatible thinking mode requires the original

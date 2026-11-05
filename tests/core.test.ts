@@ -39,6 +39,16 @@ function event(overrides: Partial<InboundEvent> = {}): InboundEvent {
 initConfig();
 
 describe('沙箱与动态配置', () => {
+  it('DeepSeek 的快速语义复核单独关闭思考，主对话仍使用原有配置', () => {
+    const oldProvider=process.env.MODEL_PROVIDER,oldBase=process.env.MODEL_BASE_URL;
+    process.env.MODEL_PROVIDER='anthropic';process.env.MODEL_BASE_URL='https://api.deepseek.com/anthropic';
+    try {
+      const main=makeModel() as {invocationParams(options:object):{thinking?:unknown;max_tokens?:number}};
+      const review=makeModel({lightweightReview:true}) as {invocationParams(options:object):{thinking?:unknown;max_tokens?:number}};
+      expect(main.invocationParams({}).thinking).toBeUndefined();
+      expect(review.invocationParams({})).toMatchObject({thinking:{type:'disabled'},max_tokens:512});
+    } finally {if(oldProvider===undefined)delete process.env.MODEL_PROVIDER;else process.env.MODEL_PROVIDER=oldProvider;if(oldBase===undefined)delete process.env.MODEL_BASE_URL;else process.env.MODEL_BASE_URL=oldBase;}
+  });
   it('工作区映射按会话隔离，模型配置文件修改后即时读取', () => {
     const modelFile = path.join(root, 'runtime.env');
     process.env.BOT_MODEL_ENV_PATH = modelFile;
@@ -303,6 +313,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
   let port = 0;
   let fileToSend = '';
   let releaseInterjection: (() => void) | undefined;
+  let releaseReview: (() => void) | undefined;
   let releaseRecovery: (() => void) | undefined;
   let releaseSummary: (() => void) | undefined;
   let resumeRecovery = false;
@@ -319,6 +330,16 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
           return;
         }
         const allText = JSON.stringify(parsed.messages);
+        if (allText.includes('群聊答复语义复核器')) {
+          if (allText.includes('复核期间插话测试')) {
+            releaseReview=()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({id:'held-review',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:JSON.stringify({needsRevision:false,reason:''})},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}))};
+            return;
+          }
+          const issue=allText.includes('语义复核测试标记') || allText.includes('无关插话复核测试');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({id:'review',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:JSON.stringify({needsRevision:issue,reason:issue?(allText.includes('无关插话复核测试')?'把无关群聊带进了答复':'没有向群友提出实际问题'):''})},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
+          return;
+        }
         if (allText.includes('累计群聊摘要') && allText.includes('项目讨论 0')) {
           releaseSummary = () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ id:'summary',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:JSON.stringify({summary:'群友曾谈论长期项目',memories:[]})},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2} })); };
           return;
@@ -341,7 +362,13 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
           return;
         }
         let reply: Record<string, unknown>;
-        if (internalScenario && isInternalAgent) reply = {role:'assistant',content:'查证完成'};
+        if (allText.includes('复核期间插话测试') && allText.includes('插话发生在复核期间')) reply={role:'assistant',content:'已考虑复核期间的插话'};
+        else if (allText.includes('复核期间插话测试')) reply={role:'assistant',content:'最初草稿'};
+        else if (allText.includes('无关插话复核测试') && allText.includes('上一条只是尚未发送')) reply={role:'assistant',content:'7 加 5 等于 12。'};
+        else if (allText.includes('无关插话复核测试')) reply={role:'assistant',content:'7 加 5 等于 12。乙，你去哪里旅游？'};
+        else if (allText.includes('语义复核测试标记') && allText.includes('上一条只是尚未发送')) reply={role:'assistant',content:'群友们，你们觉得呢？'};
+        else if (allText.includes('语义复核测试标记')) reply={role:'assistant',content:'好，我去问问。'};
+        else if (internalScenario && isInternalAgent) reply = {role:'assistant',content:'查证完成'};
         else if (internalScenario && last?.role !== 'tool') reply = {role:'assistant',content:null,tool_calls:[{id:'internal-task',type:'function',function:{name:'task',arguments:JSON.stringify({description:'内部子助手隔离测试',subagent_type:'general-purpose'})}}]};
         else if (internalScenario) reply = {role:'assistant',content:'主 Agent 已收到结果'};
         else if (allText.includes('插话整合测试') && allText.includes('关键补充')) reply = { role:'assistant',content:'已看到群友的关键补充' };
@@ -417,17 +444,85 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     await harness.receive(event({ id: 'trigger', senderId: 'user-b', senderName: '小李', content: '小王买了什么？', isMention: true }));
     await vi.waitFor(() => expect(delivered.length).toBe(1), { timeout: 15000 });
     expect(delivered[0]?.content).toContain('NAS');
-    expect(JSON.stringify(requests.at(-1)?.messages)).toContain('刚买了 NAS');
-    expect(JSON.stringify(requests.at(-1)?.messages)).toContain('小王');
-    expect(JSON.stringify(requests.at(-1)?.messages)).toContain('小王备注');
-    expect(JSON.stringify(requests.at(-1)?.messages)).toContain('负责存储设备');
-    expect(JSON.stringify(requests.at(-1)?.messages)).toContain('近期互动');
-    const modelMessages=requests.at(-1)?.messages as Array<{role:string;content:unknown}>;
+    const mainRequest=requests.slice(before).find((request)=>!JSON.stringify(request.messages).includes('群聊答复语义复核器'));
+    expect(JSON.stringify(mainRequest?.messages)).toContain('刚买了 NAS');
+    expect(JSON.stringify(mainRequest?.messages)).toContain('小王');
+    expect(JSON.stringify(mainRequest?.messages)).toContain('小王备注');
+    expect(JSON.stringify(mainRequest?.messages)).toContain('负责存储设备');
+    expect(JSON.stringify(mainRequest?.messages)).toContain('近期互动');
+    const modelMessages=mainRequest?.messages as Array<{role:string;content:unknown}>;
     const system=JSON.stringify(modelMessages.filter((message)=>message.role==='system'));
     const user=JSON.stringify(modelMessages.filter((message)=>message.role==='user'));
     expect(system).toContain('持续生效的核心人格');expect(system).not.toContain('负责存储设备');expect(user).toContain('负责存储设备');
     harness.stop(); store.close();
   }, 20000);
+  it('单独 @ 唤醒时把此前连续发言作为同一段对话，同时保留不同发言人', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
+    const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'focus-response'}}});
+    const now=Date.now();const at=(offset:number)=>new Date(now+offset).toISOString();
+    await harness.receive(event({id:'old-focus',conversationId:'group-focus',content:'之前已经结束的讨论',timestamp:at(-20000)}));
+    store.recordSent({id:'old-reply',conversationId:'group-focus',scope:'group',kind:'text',content:'上一轮已经回答'},'old-reply');
+    const before=requests.length;
+    expect(await harness.receive(event({id:'focus-1',conversationId:'group-focus',senderId:'user-a',senderName:'甲',content:'你就是大肥鱼啊',timestamp:at(1000)}))).toBe(false);
+    expect(await harness.receive(event({id:'focus-other',conversationId:'group-focus',senderId:'user-b',senderName:'乙',content:'另一位群友插话',timestamp:at(2000)}))).toBe(false);
+    expect(await harness.receive(event({id:'focus-2',conversationId:'group-focus',senderId:'user-a',senderName:'甲',content:'你不信问问其他人',timestamp:at(3000)}))).toBe(false);
+    expect(requests).toHaveLength(before);
+    await harness.receive(event({id:'focus-trigger',conversationId:'group-focus',senderId:'user-a',senderName:'甲',content:'<@bot>',isMention:true,timestamp:at(4000)}));
+    await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+    const messages=requests.slice(before).find((request)=>!JSON.stringify(request.messages).includes('群聊答复语义复核器'))?.messages as Array<{role:string;content:unknown}>;
+    const content=String(messages.find((message)=>message.role==='user')?.content);
+    const focus=content.split('本轮附近的连续对话')[1]!.split('当前请求：')[0]!;
+    expect(focus).toContain('上一轮已经回答');expect(focus).toContain('甲 [user-a]：你就是大肥鱼啊');expect(focus).toContain('乙 [user-b]：另一位群友插话');expect(focus).toContain('甲 [user-a]：你不信问问其他人');
+    expect(focus).not.toContain('之前已经结束的讨论');expect(content).toContain('这次只有 @ 没有附带文字');
+    expect(store.recent('group-focus',20).filter((row)=>row.direction==='in')).toHaveLength(5);
+    harness.stop();store.close();
+  },20000);
+  it('单独 @ 的多句对话漏掉明确互动时先复核再生成，只发送修正后的回复', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
+    const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'reviewed'}}});const now=Date.now();const at=(n:number)=>new Date(now+n).toISOString();
+    store.recordSent({id:'review-old',conversationId:'group-review',scope:'group',kind:'text',content:'我在'},'review-old');
+    const before=requests.length;
+    await harness.receive(event({id:'review-1',conversationId:'group-review',content:'语义复核测试标记',timestamp:at(1000)}));
+    await harness.receive(event({id:'review-2',conversationId:'group-review',content:'问问大家怎么看',timestamp:at(2000)}));
+    expect(requests).toHaveLength(before);
+    await harness.receive(event({id:'review-trigger',conversationId:'group-review',content:'<@bot>',isMention:true,timestamp:at(3000)}));
+    await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+    expect(delivered[0]?.content).toBe('群友们，你们觉得呢？');
+    expect(requests.slice(before)).toHaveLength(3);
+    expect(store.recent('group-review',10).filter((row)=>row.direction==='in')).toHaveLength(3);
+    harness.stop();store.close();
+  },20000);
+  it('发起人只说一句、其他群友接话后单独 @ 时也触发复核', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'review-bare'}}});
+    const now=Date.now();store.recordSent({id:'bare-old',conversationId:'group-bare',scope:'group',kind:'text',content:'我在'},'bare-old');
+    await harness.receive(event({id:'bare-1',conversationId:'group-bare',senderId:'user-a',content:'你听到他的回答了吗',timestamp:new Date(now+1000).toISOString()}));
+    await harness.receive(event({id:'bare-2',conversationId:'group-bare',senderId:'user-b',content:'我已经回答了',timestamp:new Date(now+2000).toISOString()}));
+    const before=requests.length;
+    await harness.receive(event({id:'bare-3',conversationId:'group-bare',senderId:'user-a',content:'<@bot>',isMention:true,timestamp:new Date(now+3000).toISOString()}));
+    await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+    expect(requests.slice(before).some((request)=>JSON.stringify(request.messages).includes('群聊答复语义复核器'))).toBe(true);
+    harness.stop();store.close();
+  },20000);
+  it('多群友场景复核明显无关的插话，不把其他人的闲聊强行当成当前请求', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'review-other'}}});
+    const now=Date.now();store.recordSent({id:'unrelated-old',conversationId:'group-unrelated',scope:'group',kind:'text',content:'我在'},'unrelated-old');
+    await harness.receive(event({id:'unrelated-1',conversationId:'group-unrelated',senderId:'other',senderName:'乙',content:'无关插话复核测试：明天去旅游',timestamp:new Date(now+1000).toISOString()}));
+    await harness.receive(event({id:'unrelated-trigger',conversationId:'group-unrelated',content:'<@bot> 7 加 5 等于多少？',isMention:true,timestamp:new Date(now+2000).toISOString()}));
+    await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});expect(delivered[0]?.content).toBe('7 加 5 等于 12。');
+    harness.stop();store.close();
+  },20000);
+  it('语义复核期间收到的新群消息，在发送前再次纳入本轮', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'review-late'}}});
+    const now=Date.now();releaseReview=undefined;store.recordSent({id:'late-old',conversationId:'group-review-late',scope:'group',kind:'text',content:'我在'},'late-old');
+    await harness.receive(event({id:'late-1',conversationId:'group-review-late',content:'复核期间插话测试',timestamp:new Date(now+1000).toISOString()}));
+    await harness.receive(event({id:'late-2',conversationId:'group-review-late',content:'请一起看看',timestamp:new Date(now+2000).toISOString()}));
+    await harness.receive(event({id:'late-trigger',conversationId:'group-review-late',content:'<@bot>',isMention:true,timestamp:new Date(now+3000).toISOString()}));
+    await vi.waitFor(()=>expect(releaseReview).toBeDefined(),{timeout:15000});
+    expect(await harness.receive(event({id:'late-3',conversationId:'group-review-late',senderId:'other',senderName:'乙',content:'插话发生在复核期间',timestamp:new Date(now+4000).toISOString()}))).toBe(false);
+    releaseReview!();await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+    expect(delivered[0]?.content).toBe('已考虑复核期间的插话');
+    harness.stop();store.close();
+  },20000);
   it('将真实引用和可委派的后台下载能力交给主 Agent', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
     const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'qq-quote'}}});

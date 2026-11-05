@@ -481,7 +481,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     harness.balanceAlert.notified();
     await harness.receive(event({id:'owner-balance-fail',conversationId:'group-owner-balance',senderId:'owner',content:'模型余额错误测试',isMention:true}));
     await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
-    expect(delivered[0]?.content).toBe('<@owner> 主人没饭饭吃了~呜呜');
+    expect(delivered[0]?.content).toBe('<@owner> 主人，我的饭饭吃光啦，呜呜……');
     harness.stop();store.close();
   },20000);
   it('前台工具循环在递归上限之前停止并说明情况', async () => {

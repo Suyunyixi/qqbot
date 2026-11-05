@@ -3,6 +3,7 @@ import type { Store } from '../storage/store.js';
 import type { ReplyRuntime } from '../delivery/reply.js';
 
 const setting='model_balance_alert';
+export const balanceAlertText='主人，我的饭饭吃光啦，呜呜……';
 type State={id:string;status:'pending'|'sent'|'failed'|'unknown';lastAttempt:number};
 
 export function isBalanceError(error: unknown): boolean {
@@ -44,7 +45,7 @@ export class BalanceAlert {
     if (!target) {console.warn('余额不足提醒未发送：没有绑定创建者的私聊或群身份');return;}
     state={id:state?.id ?? randomUUID(),status:'pending',lastAttempt:Date.now()};this.write(state);this.sending=true;
     try {
-      const text=target.scope==='group' ? `<@${target.external_id}> 主人没饭饭吃了~呜呜` : '主人没饭饭吃了~呜呜';
+      const text=target.scope==='group' ? `<@${target.external_id}> ${balanceAlertText}` : balanceAlertText;
       await this.reply.send(target.conversation_id,target.scope,undefined,'text',text,undefined,`balance:${state.id}`);
       this.write({...state,status:'sent'});
     } catch (error) {

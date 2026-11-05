@@ -7,7 +7,7 @@ import { TaskManager } from './task-manager.js';
 import { shouldRespond } from './trigger.js';
 import { isCommunityScope, type InboundEvent, type Sender } from '../domain/types.js';
 import { createHash } from 'node:crypto';
-import { BalanceAlert, isBalanceError } from './balance-alert.js';
+import { BalanceAlert, balanceAlertText, isBalanceError } from './balance-alert.js';
 
 export function replyForChatError(error: unknown): string {
   const status=typeof error==='object' && error!==null && 'status' in error ? Number(error.status) : undefined;
@@ -52,7 +52,7 @@ export class Harness {
       console.error('聊天回合失败：', message);
       const ownerBalance=owner && isBalanceError(err);
       if (!ownerBalance) void this.balanceAlert.report(err);
-      const response=ownerBalance ? `${isCommunityScope(event.scope) ? `<@${event.senderId}> ` : ''}主人没饭饭吃了~呜呜` : replyForChatError(err);
+      const response=ownerBalance ? `${isCommunityScope(event.scope) ? `<@${event.senderId}> ` : ''}${balanceAlertText}` : replyForChatError(err);
       try {
         await this.reply.send(event.conversationId, event.scope, event.id, 'text', response);
         if (ownerBalance) this.balanceAlert.notified();

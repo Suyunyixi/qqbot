@@ -25,6 +25,13 @@ describe('人格管理', () => {
     expect(persona(store)).toBe('新的主人格');
     store.close();
   });
+  it('人格修改留存版本与来源，保存相同内容不会增加版本', () => {
+    const file=path.join(fs.mkdtempSync(path.join(os.tmpdir(),'qq-persona-audit-')),'persona.sqlite');
+    const initial=new Store(file);expect(initial.setPersona('初始人格','admin')).toBe(true);
+    expect(initial.setPersona('初始人格','admin')).toBe(false);initial.setPersona('更新人格','qq','owner-id');initial.close();
+    const reopened=new Store(file);expect(reopened.getAppSetting('persona')).toBe('更新人格');
+    expect(reopened.personaRevisions()).toMatchObject([{source:'qq',actor_id:'owner-id'},{source:'admin',actor_id:null}]);reopened.close();
+  });
   it('管理接口只接受本机同源有效请求', async () => {
     const store = new Store(':memory:');
     const server = http.createServer((req, res) => void handlePersona(req, res, store));
@@ -36,7 +43,7 @@ describe('人格管理', () => {
       expect(rejected.status).toBe(403);
       const saved = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${address.port}` }, body: JSON.stringify({ persona: '可靠的人格' }) });
       expect(saved.status).toBe(200);
-      expect((await (await fetch(url)).json()) as unknown).toEqual({ persona: '可靠的人格' });
+      expect((await (await fetch(url)).json()) as unknown).toMatchObject({ persona: '可靠的人格', revisions: [{ source: 'admin' }] });
     } finally { await new Promise<void>((resolve) => server.close(() => resolve())); store.close(); }
   });
 });

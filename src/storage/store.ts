@@ -51,6 +51,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS app_settings (
         key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS persona_revisions (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL, source TEXT NOT NULL,
+        actor_id TEXT, created_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS qq_credentials (
         id INTEGER PRIMARY KEY CHECK (id = 1), app_id TEXT NOT NULL, app_secret TEXT NOT NULL,
         user_openid TEXT, updated_at TEXT NOT NULL
@@ -78,6 +82,8 @@ export class Store {
         platform_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
     `);
+    this.db.prepare(`INSERT INTO persona_revisions(content,source,actor_id,created_at)
+      SELECT value,'existing',NULL,updated_at FROM app_settings WHERE key='persona' AND NOT EXISTS (SELECT 1 FROM persona_revisions)`).run();
     const taskColumns=this.db.prepare('PRAGMA table_info(tasks)').all() as Array<{name:string}>;
     if(!taskColumns.some((column)=>column.name==='actor_id'))this.db.exec('ALTER TABLE tasks ADD COLUMN actor_id TEXT');
     this.memory = new MemoryRepository(this.db);
@@ -136,7 +142,20 @@ export class Store {
     return (this.db.prepare('SELECT value FROM app_settings WHERE key=?').get(key) as { value: string } | undefined)?.value;
   }
   setAppSetting(key: string, value: string): void {
+    if (key === 'persona') { this.setPersona(value, 'system'); return; }
     this.db.prepare('INSERT INTO app_settings(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at').run(key, value, new Date().toISOString());
+  }
+  setPersona(value: string, source: 'system' | 'admin' | 'qq', actorId?: string): boolean {
+    return this.db.transaction(() => {
+      if (this.getAppSetting('persona') === value) return false;
+      const now = new Date().toISOString();
+      this.db.prepare('INSERT INTO app_settings(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at').run('persona',value,now);
+      this.db.prepare('INSERT INTO persona_revisions(content,source,actor_id,created_at) VALUES (?,?,?,?)').run(value,source,actorId ?? null,now);
+      return true;
+    })();
+  }
+  personaRevisions(): Array<{seq:number;source:string;actor_id:string|null;created_at:string}> {
+    return this.db.prepare('SELECT seq,source,actor_id,created_at FROM persona_revisions ORDER BY seq DESC LIMIT 50').all() as Array<{seq:number;source:string;actor_id:string|null;created_at:string}>;
   }
   setSetting(conversationId: string, key: string, value: string): void {
     this.db.prepare('INSERT INTO conversation_settings VALUES (?,?,?) ON CONFLICT(conversation_id,key) DO UPDATE SET value=excluded.value').run(conversationId, key, value);

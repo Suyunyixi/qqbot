@@ -20,6 +20,7 @@ import { buildNativeArk, nativeCardSchema } from '../domain/card.js';
 import { rasterizeSvg, renderImageCard, runPythonScript, runShellCommand } from './python.js';
 import { groupSettings, groupSettingsSchema } from '../config/group.js';
 import { deliverMedia } from './media.js';
+import { requestsGroupStyleChange, requestsPersonaChange } from '../agent/persona-intent.js';
 export { workspaceFor } from '../storage/workspace.js';
 
 export interface ToolContext {
@@ -38,6 +39,7 @@ export interface ToolContext {
   hasPendingContext?: () => boolean;
   qqApi?: SenderApi;
   actorId?: string;
+  currentRequest?: string;
 }
 type SenderApi = (method:'GET'|'POST'|'PUT'|'PATCH'|'DELETE',path:string,body?:unknown)=>Promise<unknown>;
 const safeFile = resolveWorkspaceFile;
@@ -117,11 +119,16 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
     }), { name: 'send_native_card', description: '发送 QQ 原生 ARK 卡片。单条链接 link，多条榜单 list，大图链接 cover；已获授权的其他模板可使用 custom 并提供模板 ID 和字段。链接必须是真实来源；平台拒绝时如实说明。', schema: nativeCardSchema }),
     tool(wrap(async ({ text }: { text: string }) => {
       if (ctx.hasPendingContext?.()) throw new Error('群聊出现新的插话，请先结合最新群消息再回复');
+      if (ctx.background) {
+        if (!ctx.taskId) throw new Error('后台进度缺少任务标识');
+        await ctx.tasks.reportProgressAndWait(ctx.taskId, text);
+        return { sent: false, relayedToMain: true };
+      }
       const key = ctx.taskId ? `task:${ctx.taskId}:${ctx.notificationKey ?? (ctx.background ? 'worker' : 'callback')}:text:${createHash('sha256').update(text).digest('hex')}` : undefined;
       await ctx.reply.send(ctx.conversationId, ctx.scope, ctx.replyTo, 'text', text, undefined, key);
         ctx.sentText = true;
       return { sent: true };
-    }), { name: 'send_text', description: '立即向当前会话发送一段文字，用于必要的进度沟通或文件前后分段交流；不要重复发送。', schema: z.object({ text: z.string().min(1).max(4000) }) }),
+    }), { name: 'send_text', description: ctx.background ? '将需要告知群友的文字交给主 Agent 按主人格表达，等待主 Agent 处理完成；不要声称原文已直接发送。' : '立即向当前会话发送一段文字，用于必要的进度沟通或文件前后分段交流；不要重复发送。', schema: z.object({ text: z.string().min(1).max(4000) }) }),
     tool(wrap(async ({ file, kind }: { file: string; kind: DeliveryKind }) => {
       let actual = safeFile(ctx.conversationId, file);
       const deliveryKey = ctx.taskId ? `task:${ctx.taskId}:${kind}:${createHash('sha256').update(actual).digest('hex')}` : undefined;
@@ -147,8 +154,13 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
       return {id,type,saved:true};
     }),{name:'remember_fact',description:'当前说话人明确要求记住时使用：self 保存该用户自己的长期事实，group 保存当前群或频道的共同约定。不得替其他人编造事实，普通用户不能以此授予自己创建者权限。',schema:z.object({type:z.enum(['self','group']),content:z.string().min(1).max(2000)})}));
     if (ctx.owner) {
-      tools.push(tool(wrap(async ({ value }: { value: string }) => { ctx.store.setAppSetting('persona', value); return { saved: true, effective: 'next turn' }; }), { name: 'owner_set_persona', description: '创建者专用：只有创建者明确要求修改主人格时才使用；保存后下一回合生效。', schema: z.object({ value: z.string().min(1).max(30000) }) }));
+      tools.push(tool(wrap(async ({ value }: { value: string }) => {
+        if (!ctx.actorId || !ctx.store.memory.isOwner(ctx.scope,ctx.conversationId,ctx.actorId) || !ctx.currentRequest || !requestsPersonaChange(ctx.currentRequest)) throw new Error('只有已确认的创建者在当前消息明确要求修改人格时才能更改');
+        const changed=ctx.store.setPersona(value,'qq',ctx.actorId);return { saved: true, changed, effective: 'next turn' };
+      }), { name: 'owner_set_persona', description: '创建者专用：只有创建者在当前消息明确要求修改主人格时才使用；保存后下一回合生效。', schema: z.object({ value: z.string().min(1).max(30000) }) }));
       if (isCommunityScope(ctx.scope)) tools.push(tool(wrap(async ({ persona, keywords, enabled }: { persona?: string; keywords?: string[]; enabled?: boolean }) => {
+        if (!ctx.actorId || !ctx.store.memory.isOwner(ctx.scope,ctx.conversationId,ctx.actorId)) throw new Error('只有已确认的创建者可以修改群设置');
+        if (persona !== undefined && (!ctx.currentRequest || !requestsGroupStyleChange(ctx.currentRequest))) throw new Error('只有创建者在当前消息明确要求修改本群风格时才能更改');
         const existing = groupSettings(ctx.store, ctx.conversationId);
         const updated = groupSettingsSchema.parse({ ...existing, ...(persona === undefined ? {} : { persona }), ...(keywords === undefined ? {} : { keywords }), ...(enabled === undefined ? {} : { enabled }) });
         ctx.store.setSetting(ctx.conversationId, 'groupSettings', JSON.stringify(updated)); return { saved: true, settings: updated };
@@ -166,10 +178,10 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
       if (index >= 0) tools.splice(index, 1);
     }
     tools.push(
-      tool(wrap(async ({ instruction }: { instruction: string }) => {
+      tool(wrap(async ({ instruction, acknowledgement }: { instruction: string; acknowledgement?: string }) => {
         const id = ctx.tasks.enqueue(ctx.conversationId, ctx.scope, ctx.replyTo, instruction,ctx.actorId);
-        return { taskId: id, status: 'queued', message: '任务已在后台开始；完成或失败后会回到当前会话。' };
-      }), { name: 'start_background_task', description: '启动独立子 Agent 执行耗时任务，随后结束当前回合；完成、进度或问题会自动回调。将用户要求、链接及交付格式完整写进 instruction。', returnDirect: true, schema: z.object({ instruction: z.string().min(1).max(5000) }) }),
+        return { taskId: id, status: 'queued', acknowledgement: acknowledgement?.trim() || undefined, message: '任务已在后台开始；完成或失败后会回到当前会话。' };
+      }), { name: 'start_background_task', description: '启动独立子 Agent 执行耗时任务，随后结束当前回合；完成、进度或问题会自动回调。将用户要求、链接及交付格式完整写进 instruction；acknowledgement 写一句符合主人格、自然简短的即时回复。', returnDirect: true, schema: z.object({ instruction: z.string().min(1).max(5000), acknowledgement: z.string().max(300).optional() }) }),
       tool(wrap(async ({ taskId }: { taskId: string }) => {
         const task = ctx.store.task(taskId); if (!task || task.conversation_id !== ctx.conversationId) throw new Error('找不到当前会话的任务');
         return { taskId, status: task.status, result: task.result, error: task.error };

@@ -19,9 +19,56 @@ const { searchWeb } = await import('../src/tools/search.js');
 const { recentSocialContext } = await import('../src/agent/social-context.js');
 const { recentActivityMarker } = await import('../src/agent/social-context.js');
 const { hasEvidence, needsCurrentResearch } = await import('../src/agent/research-gate.js');
+const { capabilityManifest } = await import('../src/agent/capabilities.js');
+const { quotedMessage } = await import('../src/agent/quoted-message.js');
+const { requestsPersonaChange } = await import('../src/agent/persona-intent.js');
+const { internalSubagentTools } = await import('../src/agent/subagent-policy.js');
 function event(group:string,user:string,id:string): InboundEvent { return { id,conversationId:group,scope:'group',senderId:user,senderName:user,content:'消息',timestamp:new Date().toISOString(),isMention:false,attachments:[] }; }
 
 describe('全局用户记忆和创建者权限', () => {
+  it('引用消息作为上下文单独提取，并忽略普通消息片段', () => {
+    const raw={refMsgIdx:'quoted',msgElements:[{message_type:103,msg_idx:'quoted',content:'我可以下载文件'},{message_type:0,content:'不是引用'}]};
+    expect(quotedMessage(raw)).toBe('我可以下载文件');
+    expect(quotedMessage({msgElements:[{message_type:0,content:'不应提取'}]})).toBeUndefined();
+  });
+  it('能力清单根据前台、后台及会话范围生成', () => {
+    const enabled=capabilityManifest(['start_background_task','download_file','send_media'],['download_media','deliver_media'],'group');
+    expect(enabled.downloads).toEqual({publicFiles:true,supportedMediaSites:true,scriptFallback:false});
+    expect(enabled.backgroundOnlyTools).toContain('download_media');
+    const disabled=capabilityManifest(['send_media'],['download_media'],'guild');
+    expect(disabled.downloads.supportedMediaSites).toBe(false);expect(disabled.delivery.filesAndVideo).toBe(false);
+    expect(capabilityManifest(['run_shell_command'],[],'group',true).downloads).toEqual({publicFiles:true,supportedMediaSites:null,scriptFallback:true});
+    expect(capabilityManifest(['run_shell_command'],[],'group',false).downloads.publicFiles).toBe(false);
+  });
+  it('只有创建者在当前消息明确要求时才能修改主人格，变更有审计', async () => {
+    const store=new Store(':memory:');store.record(event('g','owner','1'));const user=store.memory.lookup('group','g','owner')!;store.memory.setOwner(user);
+    store.setPersona('原人格','admin');const reply=new ReplyRuntime(store,{send:async()=>({})});const tasks=new TaskManager(store,async()=>'',async()=>{});
+    const base={conversationId:'g',scope:'group' as const,actorId:'owner',store,reply,tasks,background:false,owner:true};
+    const invoke=async(currentRequest:string)=>JSON.parse(String(await makeTools({...base,currentRequest}).find((t)=>t.name==='owner_set_persona')!.invoke({value:'新人格'}))) as {ok:boolean};
+    expect(requestsPersonaChange('不要修改人格')).toBe(false);expect(requestsPersonaChange('我感觉主人格每次都会被调整')).toBe(false);expect(requestsPersonaChange('请问怎么修改人格')).toBe(false);
+    expect((await invoke('你好')).ok).toBe(false);expect((await invoke('不要修改人格')).ok).toBe(false);expect((await invoke('我感觉主人格每次都会被调整')).ok).toBe(false);
+    expect(store.getAppSetting('persona')).toBe('原人格');expect(store.personaRevisions()).toHaveLength(1);
+    expect((await invoke('请把主人格修改成新的设定')).ok).toBe(true);expect(store.getAppSetting('persona')).toBe('新人格');expect(store.personaRevisions()[0]).toMatchObject({source:'qq',actor_id:'owner'});
+    const groupTool=(currentRequest:string)=>makeTools({...base,currentRequest}).find((tool)=>tool.name==='owner_set_group_preferences')!;
+    const refused=JSON.parse(String(await groupTool('感觉本群风格被调整了').invoke({persona:'伪造风格'}))) as {ok:boolean};expect(refused.ok).toBe(false);expect(store.getSetting('g','groupSettings')).toBeUndefined();
+    const allowed=JSON.parse(String(await groupTool('请把本群风格改成轻松聊天').invoke({persona:'轻松聊天'}))) as {ok:boolean};expect(allowed.ok).toBe(true);expect(store.getAppSetting('persona')).toBe('新人格');
+    store.memory.setOwner(store.memory.observe('group','g','different-owner'));
+    expect((await invoke('请修改人格')).ok).toBe(false);tasks.stop();store.close();
+  });
+  it('后台文字先交给主 Agent 表达，并等待其完成', async () => {
+    const store=new Store(':memory:');const sent:string[]=[];const reply=new ReplyRuntime(store,{send:async(item)=>{sent.push(item.content);return {id:'qq'}}});
+    const taskId=store.addTask('g','group',undefined,'测试任务');store.setTask(taskId,'running');
+    const callback=vi.fn(async(task: {result:string|null})=>{await reply.send('g','group',undefined,'text',`主人人格：${task.result}`)});
+    const tasks=new TaskManager(store,async()=>'',callback);
+    const tool=makeTools({conversationId:'g',scope:'group',store,reply,tasks,background:true,taskId}).find((item)=>item.name==='send_text')!;
+    const result=JSON.parse(String(await tool.invoke({text:'工具原话'}))) as {result:{sent:boolean;relayedToMain:boolean}};
+    expect(result.result).toEqual({sent:false,relayedToMain:true});expect(callback).toHaveBeenCalledOnce();expect(sent).toEqual(['主人人格：工具原话']);
+    expect(store.pendingProgress()).toHaveLength(0);tasks.stop();store.close();
+  });
+  it('内置子助手可处理资料但不能绕过主 Agent 发言或改人格', () => {
+    const tools=['web_search','send_text','send_media','send_native_card','deliver_media','owner_set_persona','remember_fact','run_python_script'].map((name)=>({name}));
+    expect(internalSubagentTools(tools).map((item)=>item.name)).toEqual(['web_search','run_python_script']);
+  });
   it('保存平台最后一次提供的群角色，缺少角色的消息不会覆盖，群主不自动取得机器人权限', () => {
     const store=new Store(':memory:');
     store.record({...event('g','u','one'),raw:{raw:{author:{member_role:'member'}}}});
@@ -166,9 +213,11 @@ describe('管理页面接口', () => {
 
 describe('完整媒体交付', () => {
   it('本地文件先发送后说明，发送失败保留文件并记录失败', async () => {
-    const store=new Store(':memory:');const delivered:string[]=[];const reply=new ReplyRuntime(store,{send:async(item)=>{delivered.push(item.kind);return {id:'ok'}}});const tasks=new TaskManager(store,async()=>'',async()=>{});
+    const store=new Store(':memory:');const delivered:string[]=[];const reply=new ReplyRuntime(store,{send:async(item)=>{delivered.push(item.kind);return {id:`ok-${delivered.length}`}}});
+    const tasks=new TaskManager(store,async()=>'',async(task)=>{await reply.send(task.conversation_id,task.scope,task.reply_to??undefined,'text',`主人格：${task.result}`)});
     const file=path.join(workspaceFor('g-media'),'demo.bin');fs.writeFileSync(file,'sample');
-    const tool=makeTools({conversationId:'g-media',scope:'group',store,reply,tasks,background:true,taskId:'job'}).find((x)=>x.name==='deliver_media')!;
+    const taskId=store.addTask('g-media','group',undefined,'测试交付');store.setTask(taskId,'running');
+    const tool=makeTools({conversationId:'g-media',scope:'group',store,reply,tasks,background:true,taskId}).find((x)=>x.name==='deliver_media')!;
     const value=JSON.parse(String(await tool.invoke({source:file,format:'original',mode:'auto',note:'处理好了'}))) as {result:{delivered:boolean}};
     expect(value.result.delivered).toBe(true);expect(delivered).toEqual(['file','text']);
     const failedReply=new ReplyRuntime(store,{send:async()=>{throw Error('平台拒绝')}});

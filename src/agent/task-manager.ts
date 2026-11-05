@@ -55,6 +55,18 @@ export class TaskManager {
     if (!task || !['running', 'waiting'].includes(task.status)) throw new Error('任务不在运行中');
     this.store.addProgress(id, content); this.notifyPending();
   }
+  /** Route worker text through the main agent and wait before subsequent delivery. */
+  async reportProgressAndWait(id: string, content: string): Promise<void> {
+    const task = this.store.task(id);
+    if (!task || !['running', 'waiting'].includes(task.status)) throw new Error('任务不在运行中');
+    const progressId = this.store.addProgress(id, content);
+    const key = `progress:${progressId}`;
+    this.delivering.add(key);
+    try {
+      await this.onResult({ ...task, status: 'progress', result: content });
+      this.store.markProgress(progressId);
+    } finally { this.delivering.delete(key); }
+  }
   notifyPending(): void {
     if (this.stopping) return;
     for (const progress of this.store.pendingProgress()) {

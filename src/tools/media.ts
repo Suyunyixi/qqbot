@@ -47,10 +47,10 @@ export async function deliverMedia(ctx: ToolContext, request: { source: string; 
     return { path: file, original, size, kind, delivered: false, error: error instanceof Error ? error.message : String(error) };
   }
   log('平台已确认媒体消息发送');
-  let noteSent = false; let noteError: string | undefined;
+  let noteRelayed = false; let noteError: string | undefined;
   if (request.note?.trim()) {
-    try { await ctx.reply.send(ctx.conversationId, ctx.scope, ctx.replyTo, 'text', request.note, undefined, key ? `${key}:note` : undefined); noteSent = true; }
+    try { if (!ctx.taskId) throw new Error('后台任务缺少标识'); await ctx.tasks.reportProgressAndWait(ctx.taskId, request.note); noteRelayed = true; }
     catch (error) { noteError = error instanceof Error ? error.message : String(error); }
   }
-  return { path: file, original, size, kind, delivered: true, noteSent, ...(noteError ? { noteError } : {}) };
+  return { path: file, original, size, kind, delivered: true, noteRelayed, ...(noteError ? { noteError } : {}) };
 }

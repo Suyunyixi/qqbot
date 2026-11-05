@@ -50,9 +50,16 @@ export class Harness {
     }).catch(async (err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       console.error('聊天回合失败：', message);
-      void this.balanceAlert.report(err);
-      try { await this.reply.send(event.conversationId, event.scope, event.id, 'text', replyForChatError(err)); }
-      catch (sendError) { console.error('错误提示发送失败：', sendError instanceof Error ? sendError.message : sendError); }
+      const ownerBalance=owner && isBalanceError(err);
+      if (!ownerBalance) void this.balanceAlert.report(err);
+      const response=ownerBalance ? `${isCommunityScope(event.scope) ? `<@${event.senderId}> ` : ''}主人没饭饭吃了~呜呜` : replyForChatError(err);
+      try {
+        await this.reply.send(event.conversationId, event.scope, event.id, 'text', response);
+        if (ownerBalance) this.balanceAlert.notified();
+      } catch (sendError) {
+        if (ownerBalance) void this.balanceAlert.report(err);
+        console.error('错误提示发送失败：', sendError instanceof Error ? sendError.message : sendError);
+      }
     });
     return true;
   }

@@ -473,6 +473,17 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(store.recent('group-balance',10).some((row)=>row.content==='模型余额错误测试')).toBe(true);
     harness.stop();store.close();
   },20000);
+  it('创建者主动触发且余额不足时直接艾特创建者，即使已主动提醒过', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
+    store.record(event({id:'owner-seed',conversationId:'group-owner-balance',senderId:'owner',content:'之前的消息'}));
+    store.memory.setOwner(store.memory.lookup('group','group-owner-balance','owner')!);
+    const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'owner-balance-error'}}});
+    harness.balanceAlert.notified();
+    await harness.receive(event({id:'owner-balance-fail',conversationId:'group-owner-balance',senderId:'owner',content:'模型余额错误测试',isMention:true}));
+    await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+    expect(delivered[0]?.content).toBe('<@owner> 主人没饭饭吃了~呜呜');
+    harness.stop();store.close();
+  },20000);
   it('前台工具循环在递归上限之前停止并说明情况', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
     const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'loop-response'}}});

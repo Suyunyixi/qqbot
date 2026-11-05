@@ -20,6 +20,10 @@ export class BalanceAlert {
   }
   private write(state:State):void {this.store.setAppSetting(setting,JSON.stringify(state));}
   recovered():void {this.store.db.prepare('DELETE FROM app_settings WHERE key=?').run(setting);}
+  notified():void {
+    const state=this.read();
+    this.write({id:state?.id ?? randomUUID(),status:'sent',lastAttempt:Date.now()});
+  }
   async report(error:unknown):Promise<void> {
     if (!isBalanceError(error) || this.sending) return;
     let state=this.read();

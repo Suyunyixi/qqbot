@@ -11,6 +11,16 @@ export function recordMetric(store:Store, identity:Identity, phase:string, name:
   } catch(error) {console.error('运行指标保存失败：',error instanceof Error?error.message:String(error));}
 }
 
+function startToolMetric(store:Store,identity:Identity,name:string):number|bigint|undefined {
+  try {return store.db.prepare("INSERT INTO execution_metrics(conversation_id,scope,task_id,phase,name,duration_ms,status,created_at) VALUES(?,?,?,'工具',?,0,'running',?)").run(identity.conversationId,identity.scope,identity.taskId ?? null,name,new Date().toISOString()).lastInsertRowid;}
+  catch(error){console.error('工具运行记录保存失败：',error instanceof Error?error.message:String(error));return undefined;}
+}
+function finishToolMetric(store:Store,id:number|bigint|undefined,started:number,status:'success'|'failed'|'partial'):void {
+  if(id===undefined)return;
+  try {store.db.prepare('UPDATE execution_metrics SET duration_ms=?,status=? WHERE seq=?').run(Math.max(0,Date.now()-started),status,id);}
+  catch(error){console.error('工具运行记录更新失败：',error instanceof Error?error.message:String(error));}
+}
+
 /** 仅记录耗时和服务商返回的用量，不保存提示词或回复。 */
 export function metricsMiddleware(store:Store,identity:Identity,phase:string,modelName:string) {
   return createMiddleware({
@@ -21,13 +31,13 @@ export function metricsMiddleware(store:Store,identity:Identity,phase:string,mod
       catch(error) {recordMetric(store,identity,phase,modelName,started,undefined,'failed');throw error;}
     },
     wrapToolCall:async(request,handler)=>{
-      const started=Date.now();
+      const started=Date.now();const metricId=startToolMetric(store,identity,request.toolCall.name);
       try {
-        const result=await handler(request);let failed='status' in result && result.status==='error';
-        if('content' in result && typeof result.content==='string')try {failed ||= JSON.parse(result.content)?.ok===false;} catch { /* 普通文本结果无需解析。 */ }
-        recordMetric(store,identity,'工具',request.toolCall.name,started,undefined,failed?'failed':'success');return result;
+        const result=await handler(request);let failed='status' in result && result.status==='error';let partial=false;
+        if('content' in result && typeof result.content==='string')try {const parsed=JSON.parse(result.content);failed ||= parsed?.ok===false;partial=parsed?.status==='partial';} catch { /* 普通文本结果无需解析。 */ }
+        finishToolMetric(store,metricId,started,failed?'failed':partial?'partial':'success');return result;
       }
-      catch(error) {recordMetric(store,identity,'工具',request.toolCall.name,started,undefined,'failed');throw error;}
+      catch(error) {finishToolMetric(store,metricId,started,'failed');throw error;}
     },
   });
 }

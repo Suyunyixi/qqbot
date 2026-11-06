@@ -22,6 +22,8 @@ import { groupSettings, groupSettingsSchema } from '../config/group.js';
 import { deliverMedia } from './media.js';
 import { requestsGroupStyleChange } from '../agent/persona-intent.js';
 import { recordMetric } from '../agent/metrics.js';
+import { registerPluginTool } from './catalog.js';
+import { toolFailure, toolResult } from './results.js';
 export { workspaceFor } from '../storage/workspace.js';
 
 export interface ToolContext {
@@ -46,8 +48,8 @@ type SenderApi = (method:'GET'|'POST'|'PUT'|'PATCH'|'DELETE',path:string,body?:u
 const safeFile = resolveWorkspaceFile;
 function wrap<T>(fn: (value: T) => Promise<unknown>): (value: T) => Promise<string> {
   return async (value) => {
-    try { return JSON.stringify({ ok: true, result: await fn(value) }); }
-    catch (error) { return JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    try { return toolResult(await fn(value)); }
+    catch (error) { return toolFailure(error); }
   };
 }
 export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=registeredPlugins()) {
@@ -226,8 +228,9 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
     if (!required) throw new Error(`工具未声明沙箱权限：${item.name}`);
     return !disabled.has(item.name) && permitted(required, config);
   });
-  for (const plugin of pluginList) if (permitted(plugin.permissions, config)) selected.push(...plugin.createTools(ctx).filter((item) => !disabled.has(item.name)));
+  for (const plugin of pluginList) if (permitted(plugin.permissions, config)) for(const item of plugin.createTools(ctx)) if(!disabled.has(item.name) && (ctx.background || !plugin.catalog?.[item.name]?.backgroundOnly)){registerPluginTool(item,plugin.name,plugin.permissions,plugin.catalog?.[item.name]);selected.push(item);}
   const names = new Set<string>();
   for (const item of selected) { if (names.has(item.name)) throw new Error(`工具名称重复：${item.name}`); names.add(item.name); }
+  if(names.has('find_tools'))throw new Error('find_tools 是工具目录保留名称');
   return selected;
 }

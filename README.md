@@ -79,6 +79,10 @@ Agent 检查点中的图片内容单独保存在 `BOT_DATA_HOST/attachments/chec
 
 主 Agent 的能力清单由当轮实际注册的前台和后台工具生成；后台专用工具通过任务委派使用。QQ 回复引用会以引用上下文传入模型。能够尝试下载不保证目标站点授权、下载或 QQ 发送成功；音视频、文档附件不会自动理解内容。
 
+工具目录位于 `src/tools/catalog.json`，记录内置工具的中文名称、分类和用途。模型调用时保留基础工具，结合当前请求做本地匹配，并可通过 `find_tools` 搜索、预览目录或按名称启用更多工具；没有匹配不表示能力不存在。前台、后台和内部助手的目录分别由各自实际通过权限过滤的工具生成，目录预览不会全部启用。按需加载不增加独立模型分类请求，但复杂任务可能多一次工具往返；工具选择仍可能出错。工具中心展示目录、自动匹配、主动查找和执行记录；后台任务页面展示关联工具与交付状态。
+
+插件可以在 `catalog` 中按工具名提供 `label`、`category`、`description`、`backgroundOnly`、`effect` 和 `output`；旧插件继续兼容。插件直接运行于机器人进程，是受信任的本地代码，声明权限不等同于操作系统隔离。目录中的“已启用”仅表示配置和声明权限允许，外部站点、依赖和 QQ 平台权限需要实际调用或自检确认。
+
 `.env` 中的 `SEARCH_PROVIDER=auto` 会在使用 DeepSeek 官方模型地址时优先使用其结构化联网搜索，其余情况使用 SearXNG；也可指定 `deepseek` 或 `searxng`。DeepSeek 搜索由 `DEEPSEEK_SEARCH_BASE_URL` 和 `DEEPSEEK_SEARCH_MODEL` 配置。搜索结果需要读取原文和核对时间；DeepSeek 搜索本身不保证强制时间范围过滤。图片搜索优先尝试 SearXNG，无法获得图片时会搜索来源网页并提取图片链接，仍需要核对素材是否符合要求。联网搜索实现参考 [DeepSeek Harness 的搜索插件](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/web/web-search-deepseek)。
 
 明确要求最新、热门、实时或排行时，Harness 要求读取至少一个来源原文，否则不直接输出未经核实的结论。模型仍需判断来源的相关性和时效，系统不能保证识别每个隐含的时效问题或保证来源本身正确。

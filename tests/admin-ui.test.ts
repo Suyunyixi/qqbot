@@ -11,8 +11,14 @@ class Element {
   textContent = '';
   className = '';
   hidden = false;
+  disabled = false;
+  scrollTop = 0;
+  scrollHeight = 1000;
+  clientHeight = 500;
+  html = '';
   onclick?: () => unknown;
   addEventListener(name:string, callback:() => unknown) { this.listeners[name]=callback; }
+  insertAdjacentHTML(_position:string,value:string) { this.html+=value; }
 }
 class View extends Element {
   html = '';
@@ -31,8 +37,8 @@ class View extends Element {
 describe('管理页面群聊交互', () => {
   it('可配置的内置工具都有中文名称和用途', async () => {
     const {toolPermissions}=await import('../src/tools/sandbox.js');
-    const catalog=vm.runInNewContext(fs.readFileSync('assets/admin/tools.js','utf8')+'\nTOOL_CATALOG') as Record<string,string[]>;
-    const missing=Object.keys(toolPermissions).filter((name)=>!name.startsWith('owner_') && (!catalog[name] || catalog[name]!.length!==3 || !/[\u4e00-\u9fff]/.test(catalog[name]![1]!) || !/[\u4e00-\u9fff]/.test(catalog[name]![2]!)));
+    const {builtInCatalog}=await import('../src/tools/catalog.js');const catalog=builtInCatalog();
+    const missing=Object.keys(toolPermissions).filter((name)=>!name.startsWith('owner_') && (!catalog.find((entry)=>entry.name===name) || !/[\u4e00-\u9fff]/.test(catalog.find((entry)=>entry.name===name)!.label) || !/[\u4e00-\u9fff]/.test(catalog.find((entry)=>entry.name===name)!.description)));
     expect(missing).toEqual([]);
   });
   it('能切换群并保存设置，工具展示中文说明且保留未知工具配置', async () => {
@@ -49,7 +55,8 @@ describe('管理页面群聊交互', () => {
       else if(input==='/api/tasks')data={tasks:[]};
       else if(input==='/api/deliveries')data={deliveries:[]};
       else if(input==='/api/metrics')data={totals:[],recent:[]};
-      else if(input==='/api/tools')data={tools:['web_search'],requirements:{web_search:['network']}};
+      else if(input==='/api/tools')data={tools:['web_search'],requirements:{web_search:['network']},catalog:[{name:'web_search',label:'联网搜索',category:'联网与资料',description:'搜索网页',permissions:['network'],source:'内置',execution:'前台或后台',effect:'只读或计算',status:'已启用'}]};
+      else if(input==='/api/tool-activity')data={discoveries:[{conversation_id:'first',query:'查资料',candidates:'["web_search"]'}],calls:[{conversation_id:'first',name:'web_search',status:'success',duration_ms:12}]};
       else if(input==='/api/runtime-config' && options?.method==='PUT'){savedRuntime=JSON.parse(options.body!) as Record<string,unknown>;data={ok:true};}
       else if(input==='/api/runtime-config')data={model:{provider:'anthropic',baseUrl:'https://example.com',name:'model',vision:true,semanticReview:true,contextTokens:1048576},memory:{recentMessages:60,summaryBudgetChars:8000,summaryThresholdPercent:75},tasks:{concurrency:3},tools:{search:true,media:true,python:true},permissions:{network:true}};
       else if(input==='/api/plugins')data={plugins:[]};
@@ -59,13 +66,16 @@ describe('管理页面群聊交互', () => {
       return {ok:true,json:async()=>data};
     });
     const context=vm.createContext({document:{querySelector:element,querySelectorAll:()=>[]},fetch,URLSearchParams,console,setInterval:()=>0,setTimeout:()=>0,clearTimeout:()=>{}});
-    vm.runInContext(fs.readFileSync('assets/admin/tools.js','utf8'),context);
     vm.runInContext(fs.readFileSync('assets/admin/admin.js','utf8'),context);
     await vi.waitFor(()=>expect(view.innerHTML).toContain('启动自检'));
     await vm.runInContext("page('groups')",context);
     expect(view.innerHTML).toContain('联网搜索');expect(view.innerHTML).toContain('优先关注的时间范围');
     expect(view.innerHTML).toContain('未命名QQ群 1');expect(view.innerHTML).toContain('未命名QQ群 2');
     expect(view.innerHTML).not.toContain('QQ群 first');expect(view.innerHTML).not.toContain('QQ群 second');
+    vm.runInContext("state.conversations[0].platform_name='QQ 群名称'",context);
+    expect(vm.runInContext("conversationName('first')",context)).toBe('QQ 群名称');
+    vm.runInContext("state.conversations[0].label='人工备注'",context);
+    expect(vm.runInContext("conversationName('first')",context)).toBe('人工备注');
     await view.groupButtons[1]!.listeners.click!();
     expect(view.innerHTML).toContain('data-group="second"');
     expect(view.innerHTML).toContain('list-item selectable selected" data-group="second"');
@@ -79,6 +89,8 @@ describe('管理页面群聊交互', () => {
     element('#memory-recent').value='60';element('#memory-budget').value='8000';element('#memory-percent').value='75';element('#task-concurrency').value='3';
     await element('#save-settings').onclick!();
     expect(savedRuntime).toMatchObject({model:{contextTokens:1048576},memory:{recentMessages:60,summaryBudgetChars:8000,summaryThresholdPercent:75},tasks:{concurrency:3}});
+    await vm.runInContext("page('tools')",context);
+    expect(view.innerHTML).toContain('工具目录');expect(view.innerHTML).toContain('联网搜索');expect(view.innerHTML).toContain('查资料');expect(view.innerHTML).toContain('12 毫秒');
   });
   it('区分群聊和私聊，能编辑会话备注并添加成员备注', async () => {
     const view=new View();const elements=new Map<string,Element>([['#view',view]]);
@@ -101,7 +113,7 @@ describe('管理页面群聊交互', () => {
       return {ok:true,json:async()=>data};
     });
     const context=vm.createContext({document:{querySelector:element,querySelectorAll:()=>[]},fetch,URLSearchParams,console,setInterval:()=>0,setTimeout:()=>0,clearTimeout:()=>{}});
-    vm.runInContext(fs.readFileSync('assets/admin/tools.js','utf8'),context);vm.runInContext(fs.readFileSync('assets/admin/admin.js','utf8'),context);
+    vm.runInContext(fs.readFileSync('assets/admin/admin.js','utf8'),context);
     await vi.waitFor(()=>expect(view.innerHTML).toContain('启动自检'));
     await vm.runInContext("page('conversations')",context);
     expect(view.innerHTML).toContain('QQ群');expect(view.innerHTML).toContain('QQ 私聊');expect(view.innerHTML).toContain('g-id');
@@ -119,5 +131,30 @@ describe('管理页面群聊交互', () => {
     expect(view.innerHTML).toContain('平台成员 ID');expect(view.innerHTML).toContain('不代表 QQ 群主或管理员');
     element('#new-member-id').value='openid-1';element('#new-member-name').value='成员备注';element('#new-member-note').value='人工信息';await element('#add-member').onclick!();
     expect(member).toMatchObject({scope:'group',conversationId:'g-id',externalId:'openid-1',remarkName:'成员备注',note:'人工信息'});
+  });
+  it('聊天记录以聊天气泡展示并向上加载更早消息', async () => {
+    const view=new View();const elements=new Map<string,Element>([['#view',view]]);
+    const element=(selector:string)=>{if(!elements.has(selector))elements.set(selector,new Element());return elements.get(selector)!};
+    const urls:string[]=[];
+    const fetch=vi.fn(async(input:string)=>{
+      urls.push(input);let data:unknown={};
+      if(input==='/api/conversations')data={conversations:[{scope:'group',conversation_id:'group-id',first_seq:1,label:'我的群',message_count:2}]};
+      else if(input==='/api/identities')data={identities:[],owner:''};
+      else if(input==='/status')data={phase:'ready',qqConnected:true,checks:[]};
+      else if(input==='/api/tasks')data={tasks:[]};
+      else if(input==='/api/deliveries')data={deliveries:[]};
+      else if(input==='/api/metrics')data={totals:[],recent:[]};
+      else if(input.startsWith('/api/messages?'))data=input.includes('before=')?{messages:[{id:'old',conversation_id:'group-id',direction:'in',sender_name:'群友',content:'更早的消息',attachments:'[]'}],hasMore:false,nextBefore:null}:{messages:[{id:'latest',conversation_id:'group-id',direction:'out',content:'<最新消息>',attachments:'[]'}],hasMore:true,nextBefore:12};
+      else throw Error(`unexpected ${input}`);
+      return {ok:true,json:async()=>data};
+    });
+    const context=vm.createContext({document:{querySelector:element,querySelectorAll:()=>[]},fetch,URLSearchParams,console,setInterval:()=>0,setTimeout:()=>0,clearTimeout:()=>{}});
+    vm.runInContext(fs.readFileSync('assets/admin/admin.js','utf8'),context);
+    await vi.waitFor(()=>expect(view.innerHTML).toContain('启动自检'));
+    await vm.runInContext("page('history')",context);
+    expect(view.innerHTML).toContain('我的群');expect(view.innerHTML).toContain('chat-message out');expect(view.innerHTML).toContain('&lt;最新消息&gt;');
+    await element('#history-older').onclick!();
+    expect(urls.some((url)=>url.includes('before=12'))).toBe(true);
+    expect(element('#history-messages').html).toContain('更早的消息');expect(element('#history-older').hidden).toBe(true);
   });
 });

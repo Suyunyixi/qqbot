@@ -1,4 +1,4 @@
-// Labels describe the project tools; internal names remain stable for settings.
+// 旧版管理页面兼容数据；新页面使用后端工具目录。
 const TOOL_CATALOG = {
   web_search:['联网与资料','联网搜索','搜索网页，获得来源链接和检索时间。'],
   research_web:['联网与资料','搜索并核对来源','搜索多个方向并读取原文，适合需要核实的信息。'],

@@ -7,6 +7,7 @@ import { Harness } from '../../agent/harness.js';
 import { Store } from '../../storage/store.js';
 import type { DeliveryItem, InboundEvent, Sender, SendResult } from '../../domain/types.js';
 import { qqVoiceBuffer } from './voice.js';
+import { QQGroupProfiles } from './group-profiles.js';
 import { buildNativeArk } from '../../domain/card.js';
 import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs/protocol';
 import { GatewayConnection, dispatchEvent, type GatewayConnectionOptions, type InboundMessage } from '@tencent-connect/qqbot-nodejs/protocol';
@@ -48,10 +49,12 @@ export class QQAdapter implements Sender {
   private abort?: AbortController;
   private inbound?: (message:InboundMessage)=>void;
   private interaction?: (event:InteractionEvent)=>void;
+  private readonly groupProfiles: QQGroupProfiles;
   constructor(private readonly credentials: QrConnectCredentials, private readonly store: Store, private readonly onState: (connected: boolean) => void, private readonly gatewayFactory:(options:GatewayConnectionOptions)=>{start():Promise<void>}=(options)=>new GatewayConnection(options)) {
     // SDK debug output contains complete inbound events and outgoing messages.
     // Keep operational errors without duplicating private chats or tokens in Docker logs.
     this.bot = new QQBot({ appId: credentials.appId, appSecret: credentials.appSecret, logger: { info: console.info, warn: console.warn, error: console.error } });
+    this.groupProfiles = new QQGroupProfiles(store, (id)=>this.bot.api.get(`/v2/groups/${encodeURIComponent(id)}/info`));
     this.bot.on('ready', () => { this.connected = true; this.onState(true); console.log('QQ 已连接'); });
     this.bot.on('resumed', () => { this.connected = true; this.onState(true); });
     this.bot.on('disconnected', () => { this.connected = false; this.onState(false); });
@@ -68,6 +71,7 @@ export class QQAdapter implements Sender {
       const isMention = msg.rawEventType === 'GROUP_AT_MESSAGE_CREATE' || msg.rawEventType==='AT_MESSAGE_CREATE' || Boolean(msg.mentions?.some((m) => m.is_you === true)) || content.includes(`<@!${this.bot.appId}>`) || content.includes(`<@${this.bot.appId}>`);
       const event: InboundEvent = { id: msg.messageId, conversationId, scope, senderId: msg.senderId, senderName: msg.senderName, content, timestamp: msg.timestamp || new Date().toISOString(), isMention, attachments: msg.attachments ?? [], raw: msg };
       void harness.receive(event).catch((err: unknown) => console.error('接收消息失败：', err instanceof Error ? err.message : err));
+      if(scope==='group' && this.connected)void this.groupProfiles.refresh(conversationId).catch(()=>console.error('群资料缓存更新失败'));
     };
     this.bot.on('message', (_ctx, msg: QQBotInboundMessage) => this.inbound?.(msg));
     this.interaction = (event:InteractionEvent) => {
@@ -92,7 +96,7 @@ export class QQAdapter implements Sender {
     const gateway=this.gatewayFactory({account:{accountId:appId,appId,clientSecret},abortSignal:abort.signal,...(rawIntents?{intents:Number(rawIntents)}:{}),
       getAccessToken:()=>this.bot.tokenManager.getAccessToken(appId,clientSecret),clearTokenCache:()=>this.bot.tokenManager.clearCache(appId),getGatewayUrl:()=>this.bot.messageApi.getGatewayUrl(creds),
       session:{load:()=>{try {const value=JSON.parse(this.store.getAppSetting('qq_gateway_session') ?? 'null');return value && typeof value.sessionId==='string'?value:null;}catch{return null;}},save:(value)=>this.store.setAppSetting('qq_gateway_session',JSON.stringify(value)),clear:()=>this.store.setAppSetting('qq_gateway_session','null')},
-      onReady:()=>{this.connected=true;this.onState(true);console.log('QQ 已连接');},onResumed:()=>{this.connected=true;this.onState(true);},onDisconnected:()=>{this.connected=false;this.onState(false);},onError:(error)=>console.error('QQ 连接错误：',error.message),onMessage:(msg)=>this.inbound?.(msg),onInteraction:(event)=>this.interaction?.(event),onRawEvent:(type,data)=>{try{
+      onReady:()=>{this.connected=true;this.onState(true);console.log('QQ 已连接');void this.groupProfiles.refreshKnown().catch(()=>console.error('群资料缓存更新失败'));},onResumed:()=>{this.connected=true;this.onState(true);void this.groupProfiles.refreshKnown().catch(()=>console.error('群资料缓存更新失败'));},onDisconnected:()=>{this.connected=false;this.onState(false);},onError:(error)=>console.error('QQ 连接错误：',error.message),onMessage:(msg)=>this.inbound?.(msg),onInteraction:(event)=>this.interaction?.(event),onRawEvent:(type,data)=>{try{
         if(type==='MESSAGE_CREATE') {const parsed=dispatchEvent('AT_MESSAGE_CREATE',data,appId);if(parsed.action==='message')this.inbound?.({...parsed.msg,rawEventType:type});return;}
         this.store.recordPlatformEvent(type,data);
       }catch(error){console.error('QQ 事件保存失败：',error instanceof Error?error.message:String(error))}},

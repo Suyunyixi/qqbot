@@ -4,7 +4,6 @@ import { persona } from '../agent/runtime.js';
 import { Store } from '../storage/store.js';
 import type { Harness } from '../agent/harness.js';
 import { groupSettings, groupSettingsSchema } from '../config/group.js';
-import { toolPermissions } from '../tools/sandbox.js';
 import { z } from 'zod';
 import { readConfig, runtimeOverrideSchema } from '../config/settings.js';
 import { registeredPlugins, reloadPlugins } from '../tools/plugins.js';
@@ -13,6 +12,7 @@ import { ReplyRuntime } from '../delivery/reply.js';
 import { TaskManager } from '../agent/task-manager.js';
 import { platformRoleFromRaw } from '../storage/memory.js';
 import { AttachmentArchive } from '../storage/attachments.js';
+import { builtInCatalog, describeTool, toolFeature } from '../tools/catalog.js';
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value));
@@ -73,7 +73,8 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
     if (req.method === 'GET' && url.pathname === '/api/conversations') {
       const rows = store.db.prepare(`SELECT conversation_id,scope,COUNT(*) AS message_count,MIN(seq) AS first_seq,MAX(timestamp) AS last_activity FROM messages GROUP BY conversation_id,scope ORDER BY MAX(seq) DESC LIMIT 500`).all() as Array<{conversation_id:string;scope:string;message_count:number;first_seq:number;last_activity:string}>;
       const profile=store.db.prepare('SELECT label,note FROM conversation_profiles WHERE scope=? AND conversation_id=?');
-      json(res, 200, { conversations: rows.map((row) => { const saved=profile.get(row.scope,row.conversation_id) as {label:string;note:string}|undefined; const settings=['group','guild'].includes(row.scope) ? groupSettings(store,row.conversation_id) : undefined; return {...row,settings,label:settings ? settings.label : saved?.label || '',note:saved?.note || ''}; }) }); return;
+      const groupProfile=store.db.prepare('SELECT name,info,last_success_at,error FROM qq_group_profiles WHERE conversation_id=?');
+      json(res, 200, { conversations: rows.map((row) => { const saved=profile.get(row.scope,row.conversation_id) as {label:string;note:string}|undefined; const settings=['group','guild'].includes(row.scope) ? groupSettings(store,row.conversation_id) : undefined; const platform=row.scope==='group'?groupProfile.get(row.conversation_id) as {name:string;info:string;last_success_at:string|null;error:string|null}|undefined:undefined; return {...row,settings,label:settings ? settings.label : saved?.label || '',note:saved?.note || '',platform_name:platform?.name || '',platform_info:platform?JSON.parse(platform.info):null,platform_updated_at:platform?.last_success_at ?? null,platform_error:platform?.error ?? null}; }) }); return;
     }
     if (req.method === 'GET' && url.pathname === '/api/messages') {
       const conversationId = id.parse(url.searchParams.get('conversationId'));
@@ -85,7 +86,22 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
       const attachmentRows=store.db.prepare('SELECT attachment_index,status,error FROM message_attachments WHERE conversation_id=? AND message_id=? ORDER BY attachment_index');
       json(res, 200, { hasMore, nextBefore:hasMore ? page[page.length-1]?.seq : null, messages: page.reverse().map(({raw, ...row}) => { let eventType: unknown; let platformRole: string|undefined; try { if (typeof raw==='string') { const parsed=JSON.parse(raw) as {rawEventType?:unknown};eventType=parsed.rawEventType;if(row.scope==='group'||row.scope==='guild')platformRole=platformRoleFromRaw(parsed); } } catch { /* 兼容早期记录。 */ } return { ...row, conversation_id:conversationId, eventType, platformRole, archivedAttachments:attachmentRows.all(conversationId,row.id), botRole: row.direction === 'out' ? 'bot' : row.user_id && row.user_id === owner ? 'owner' : 'ordinary' }; }) }); return;
     }
-    if (req.method === 'GET' && url.pathname === '/api/tools') { json(res, 200, { tools: Object.keys(toolPermissions).filter((name) => !name.startsWith('owner_')).sort(), requirements: toolPermissions }); return; }
+    if (req.method === 'GET' && url.pathname === '/api/tools') {
+      const config=readConfig();const entries=builtInCatalog().filter((entry)=>!entry.name.startsWith('owner_'));
+      const probe=new Store(':memory:');const reply=new ReplyRuntime(probe,{send:async()=>({})});const tasks=new TaskManager(probe,async()=>'',async()=>{});
+      let pluginError='';
+      try {for(const background of [false,true])for(const item of makeTools({conversationId:'_catalog',scope:'c2c',store:probe,reply,tasks,background,taskId:background?'catalog':undefined})) {
+        const entry=describeTool(item,true);const index=entries.findIndex((existing)=>existing.name===entry.name);if(index>=0)entries[index]=entry;else if(entry.source!=='内置')entries.push(entry);
+      }} catch(error){pluginError=error instanceof Error?error.message:String(error);} finally {tasks.stop();probe.close();}
+      const catalog=entries.map((entry)=>{const feature=toolFeature[entry.name];const missing=entry.permissions.filter((permission)=>!config.sandbox.permissions[permission]);return {...entry,status:feature && !config.tools[feature]?'全局已关闭':missing.length?'缺少沙箱权限':'已启用，实际可用性取决于依赖和平台权限',missing};});
+      const requirements=Object.fromEntries(catalog.map((entry)=>[entry.name,entry.permissions]));
+      json(res,200,{tools:catalog.filter((entry)=>entry.name!=='find_tools').map((entry)=>entry.name),requirements,catalog,pluginError});return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/tool-activity') {
+      const discoveries=store.db.prepare('SELECT conversation_id,scope,task_id,query,candidates,created_at,kind FROM tool_discoveries ORDER BY seq DESC LIMIT 100').all();
+      const calls=store.db.prepare("SELECT conversation_id,scope,task_id,name,duration_ms,status,created_at FROM execution_metrics WHERE phase='工具' ORDER BY seq DESC LIMIT 150").all();
+      json(res,200,{discoveries,calls});return;
+    }
     if (req.method === 'GET' && url.pathname === '/api/plugins') { json(res,200,{plugins:registeredPlugins().map((item)=>({name:item.name,permissions:item.permissions}))});return; }
     if (req.method === 'POST' && url.pathname === '/api/plugins/reload') {
       const items=await reloadPlugins(undefined,(candidates)=>{
@@ -161,7 +177,10 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
     if (req.method === 'GET' && url.pathname === '/api/tasks') {
       const tasks = store.db.prepare('SELECT * FROM tasks ORDER BY created_at DESC LIMIT 200').all();
       const progress = store.db.prepare('SELECT task_id,content,created_at,sent FROM task_progress ORDER BY created_at DESC LIMIT 500').all();
-      json(res, 200, { tasks, progress }); return;
+      const calls=store.db.prepare("SELECT task_id,name,duration_ms,status,created_at FROM execution_metrics WHERE phase='工具' AND task_id IS NOT NULL ORDER BY seq DESC LIMIT 500").all();
+      const discoveries=store.db.prepare('SELECT task_id,query,candidates,created_at,kind FROM tool_discoveries WHERE task_id IS NOT NULL ORDER BY seq DESC LIMIT 300').all();
+      const deliveries=store.db.prepare("SELECT t.id AS task_id,o.kind,o.file_name,o.status,o.error,o.created_at FROM tasks t JOIN outbox o ON o.id LIKE 'task:' || t.id || ':%' ORDER BY o.created_at DESC LIMIT 500").all();
+      json(res, 200, { tasks, progress, calls, discoveries, deliveries }); return;
     }
     if (req.method === 'POST' && url.pathname === '/api/tasks/action') {
       if (!harness) throw new Error('机器人运行时尚未启动');

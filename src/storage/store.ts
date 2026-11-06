@@ -45,6 +45,11 @@ export class Store {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS execution_metrics_time ON execution_metrics(created_at);
+      CREATE TABLE IF NOT EXISTS tool_discoveries (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL, scope TEXT NOT NULL,
+        task_id TEXT, query TEXT NOT NULL, candidates TEXT NOT NULL, created_at TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'search'
+      );
+      CREATE INDEX IF NOT EXISTS tool_discoveries_task ON tool_discoveries(task_id,seq);
       CREATE TABLE IF NOT EXISTS summaries (
         conversation_id TEXT PRIMARY KEY, summary TEXT NOT NULL, through_seq INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL
@@ -60,6 +65,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS conversation_profiles (
         scope TEXT NOT NULL, conversation_id TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
         note TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL, PRIMARY KEY(scope,conversation_id)
+      );
+      CREATE TABLE IF NOT EXISTS qq_group_profiles (
+        conversation_id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', info TEXT NOT NULL DEFAULT '{}',
+        last_attempt_at TEXT NOT NULL, last_success_at TEXT, error TEXT
       );
       CREATE TABLE IF NOT EXISTS app_settings (
         key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -99,6 +108,8 @@ export class Store {
       SELECT value,'existing',NULL,updated_at FROM app_settings WHERE key='persona' AND NOT EXISTS (SELECT 1 FROM persona_revisions)`).run();
     const taskColumns=this.db.prepare('PRAGMA table_info(tasks)').all() as Array<{name:string}>;
     if(!taskColumns.some((column)=>column.name==='actor_id'))this.db.exec('ALTER TABLE tasks ADD COLUMN actor_id TEXT');
+    const discoveryColumns=this.db.prepare('PRAGMA table_info(tool_discoveries)').all() as Array<{name:string}>;
+    if(!discoveryColumns.some((column)=>column.name==='kind'))this.db.exec("ALTER TABLE tool_discoveries ADD COLUMN kind TEXT NOT NULL DEFAULT 'search'");
     this.memory = new MemoryRepository(this.db);
     this.memory.bootstrapOwner(this.qqCredentials()?.userOpenid);
   }

@@ -163,6 +163,11 @@ describe('消息记录与触发', () => {
     expect(voiceTranscripts(input)).toEqual(['你好']);
     const images = imageAttachments(input, [], '看看');
     expect(images).toHaveLength(1);
+    const store=new Store(':memory:');const now=Date.now();
+    store.record(event({id:'near-image',content:'',timestamp:new Date(now-21000).toISOString(),attachments:[{content_type:'image/png',url:'https://example.qq.com/p.png'}]}));
+    expect(imageAttachments([],store.recent('group-a',10),'这个人',new Date(now).toISOString())).toHaveLength(1);
+    expect(imageAttachments([],store.recent('group-a',10),'普通聊天',new Date(now+600000).toISOString())).toHaveLength(0);
+    store.close();
     await expect(qqImageDataUrl(images[0]!)).rejects.toThrow('QQ 媒体地址');
     await expect(readPublicWebpage('http://127.0.0.1/')).rejects.toThrow('内网或本机');
   });
@@ -370,6 +375,9 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
         }
         let reply: Record<string, unknown>;
         if (allText.includes('工具死循环模拟')) reply={role:'assistant',content:null,tool_calls:[{id:`loop-${requests.length}`,type:'function',function:{name:'sandbox_capabilities',arguments:'{}'}}]};
+        else if (allText.includes('工具按需加载测试') && last?.role !== 'tool') reply={role:'assistant',content:null,tool_calls:[{id:'discover-test',type:'function',function:{name:'find_tools',arguments:JSON.stringify({names:['inspect_media']})}}]};
+        else if (allText.includes('工具按需加载测试') && last?.name==='find_tools') reply={role:'assistant',content:null,tool_calls:[{id:'inspect-test',type:'function',function:{name:'inspect_media',arguments:JSON.stringify({input:'/不存在的测试文件'})}}]};
+        else if (allText.includes('工具按需加载测试')) reply={role:'assistant',content:'已核实工具调用结果'};
         else if (allText.includes('复核期间插话测试') && allText.includes('插话发生在复核期间')) reply={role:'assistant',content:'已考虑复核期间的插话'};
         else if (allText.includes('复核期间插话测试')) reply={role:'assistant',content:'最初草稿'};
         else if (allText.includes('无关插话复核测试') && allText.includes('上一条只是尚未发送')) reply={role:'assistant',content:'7 加 5 等于 12。'};
@@ -603,6 +611,23 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(request).toContain('用户引用的消息');expect(request).toContain('此前关于下载能力的消息');expect(request).toContain('backgroundOnlyTools');expect(request).toContain('download_media');expect(request).toContain('supportedMediaSites');
     harness.stop();store.close();
   },20000);
+  it('真实 Agent 先发现工具，再动态加载并执行，普通消息不触发', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'dynamic-ok'}}});
+    try {
+      const before=requests.length;
+      expect(await harness.receive(event({id:'dynamic-silent',conversationId:'dynamic-group',content:'不触发'}))).toBe(false);
+      expect(requests).toHaveLength(before);
+      await harness.receive(event({id:'dynamic-trigger',conversationId:'dynamic-group',content:'工具按需加载测试',isMention:true}));
+      await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+      const calls=requests.slice(before).filter((item)=>JSON.stringify(item.messages).includes('工具按需加载测试'));
+      const names=(item:Record<string,unknown>)=>((item.tools ?? []) as Array<{function?:{name?:string}}>).map((entry)=>entry.function?.name);
+      expect(calls.length).toBeGreaterThanOrEqual(3);
+      expect(names(calls[0]!)).toContain('find_tools');expect(names(calls[0]!)).not.toContain('inspect_media');
+      expect(names(calls[1]!)).toContain('inspect_media');
+      expect(store.db.prepare("SELECT candidates FROM tool_discoveries WHERE conversation_id='dynamic-group' AND kind='search'").get()).toMatchObject({candidates:'["inspect_media"]'});
+      expect((store.db.prepare("SELECT COUNT(*) AS n FROM execution_metrics WHERE conversation_id='dynamic-group' AND name='inspect_media'").get() as {n:number}).n).toBe(1);
+    } finally {harness.stop();store.close();}
+  },20000);
   it('用户发来的图片作为有来源的素材传给模型，并保留主人格', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
     store.setPersona('测试人格：自然接话，认真回答问题。','system');
@@ -622,6 +647,24 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       const embeddedWrites=saver.db.prepare("SELECT COUNT(*) AS n FROM writes WHERE thread_id=? AND CAST(value AS TEXT) LIKE '%data:image/png;base64,%'").get('group:group-image-source') as {n:number};
       expect(embedded.n).toBe(0);expect(embeddedWrites.n).toBe(0);saver.db.close();
     } finally {imageFetch.mockRestore();harness.stop();store.close();}
+  },20000);
+  it('近期图片后的指代同时包含图片和其他群友原话，无需图片关键词', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'context-image'}}});
+    const original=globalThis.fetch;const fetchImage=vi.spyOn(globalThis,'fetch').mockImplementation((input,init)=>String(input).startsWith('https://example.qq.com/')?Promise.resolve(new Response(Uint8Array.from([137,80,78,71]),{headers:{'content-type':'image/png'}})):original(input,init));
+    try {
+      const now=Date.now(),before=requests.length;
+      expect(await harness.receive(event({id:'context-comment',conversationId:'group-image-context',senderId:'other',senderName:'苍蓝',content:'这他妈原价打完要20多w',timestamp:new Date(now-100000).toISOString()}))).toBe(false);
+      expect(await harness.receive(event({id:'context-picture',conversationId:'group-image-context',senderId:'user-a',content:'',timestamp:new Date(now-21000).toISOString(),attachments:[{url:'https://example.qq.com/context.png',content_type:'image/png'}]}))).toBe(false);
+      await vi.waitFor(()=>expect(store.db.prepare("SELECT status FROM message_attachments WHERE message_id='context-picture'").get()).toMatchObject({status:'saved'}));
+      expect(requests).toHaveLength(before);
+      await harness.receive(event({id:'context-trigger',conversationId:'group-image-context',content:'大肥鱼说说这个吐脏话的人',isMention:true,timestamp:new Date(now).toISOString()}));
+      await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+      const request=requests.slice(before).find((item)=>JSON.stringify(item.messages).includes('大肥鱼说说这个吐脏话的人'));
+      const text=JSON.stringify(request?.messages);
+      expect(text).toContain('data:image/png;base64,');expect(text).toContain('图片来源：之前聊天中可能相关');
+      expect(text).toContain('苍蓝');expect(text).toContain('这他妈原价打完要20多w');
+      expect(text).toContain('不要把图片不可读等同于没有收到群友发言');
+    } finally {fetchImage.mockRestore();harness.stop();store.close();}
   },20000);
   it('Deep Agents 内部子助手不能直接调用消息发送或人格修改工具', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];

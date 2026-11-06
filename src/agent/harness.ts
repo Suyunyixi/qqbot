@@ -40,7 +40,7 @@ export class Harness {
       catch(error) {void this.balanceAlert.report(error);throw error;}
     }, (task) => this.callback(task));
   }
-  start(): void { this.store.recoverSending(); this.tasks.start(); }
+  start(): void { this.store.db.prepare("UPDATE execution_metrics SET status='interrupted' WHERE phase='工具' AND status='running'").run();this.store.recoverSending(); this.tasks.start(); }
   async receive(event: InboundEvent): Promise<boolean> {
     if (!this.store.record(event)) return false;
     this.attachments.enqueue(event);

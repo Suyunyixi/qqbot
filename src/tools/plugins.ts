@@ -10,6 +10,8 @@ import type { ToolPermission } from './sandbox.js';
 export interface ToolPlugin {
   name: string;
   permissions: ToolPermission[];
+  /** 可为插件工具提供中文名称、分类和用途；旧插件可不填写。 */
+  catalog?: Record<string,{label?:string;category?:string;description?:string;backgroundOnly?:boolean;effect?:'只读或计算'|'工作区写入'|'消息交付'|'配置变更';output?:string}>;
   /** Run at startup; throw if a required dependency or configuration is unavailable. */
   selfCheck(): Promise<void> | void;
   /** Return tools bound to this conversation. Long-running tools belong in background. */

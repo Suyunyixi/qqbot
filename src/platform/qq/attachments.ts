@@ -11,11 +11,18 @@ export function attachmentSummary(value:unknown):string {
 export function voiceTranscripts(items: unknown[]): string[] {
   return typed(items).map((a) => a.asr_refer_text?.trim()).filter((x): x is string => !!x);
 }
-export function imageAttachments(current: unknown[], recent: MessageRow[], content: string): Attachment[] {
+export function imageAttachments(current: unknown[], recent: MessageRow[], content: string, timestamp?:string, windowSeconds=180): Attachment[] {
   let selected = typed(current).filter((a) => a.content_type?.toLowerCase().startsWith('image/') && a.url);
-  if (!selected.length && /图片|照片|截图|上面|上张|这张|看看|图里/.test(content)) {
+  const explicitReference=/图片|照片|截图|上面|上张|这张|看看|图里/.test(content);
+  if (!selected.length && (explicitReference || timestamp)) {
+    const eventTime=timestamp?Date.parse(timestamp):NaN;
+    let distance=0;
     for (const row of [...recent].reverse()) {
-      try { selected = typed(JSON.parse(row.attachments) as unknown[]).filter((a) => a.content_type?.toLowerCase().startsWith('image/') && a.url); } catch { /* old malformed metadata */ }
+      distance++;
+      const age=(eventTime-Date.parse(row.timestamp))/1000;
+      const nearby=Number.isFinite(age) && age>=-60 && age<=windowSeconds && distance<=8;
+      if(!explicitReference && !nearby)continue;
+      try { selected = typed(JSON.parse(row.attachments) as unknown[]).filter((a) => a.content_type?.toLowerCase().startsWith('image/') && a.url); } catch { /* 兼容早期格式异常的附件信息。 */ }
       if (selected.length) break;
     }
   }

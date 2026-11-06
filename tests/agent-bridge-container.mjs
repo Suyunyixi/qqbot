@@ -14,17 +14,19 @@ const { workspaceFor } = await import('./dist/storage/workspace.js');
 const { Harness } = await import('./dist/agent/harness.js');
 const id = 'agent-bridge-test'; const output = path.join(workspaceFor(id), 'card.svg');
 const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="60"><rect width="100" height="60" fill="red"/></svg>';
-let requests = 0; let registered = false;
+let requests = 0; let registered = false; let discovered = false;
 const server = http.createServer((req, res) => {
   let body = ''; req.on('data', (chunk) => { body += chunk; });
   req.on('end', () => {
     const request = JSON.parse(body); requests++;
     const names = (request.tools || []).map((item) => item.function?.name);
-    registered ||= ['run_python_script', 'render_image_card', 'send_native_card', 'send_media'].every((name) => names.includes(name));
+    registered ||= ['find_tools', 'send_media'].every((name) => names.includes(name));
+    discovered ||= ['run_python_script', 'render_image_card', 'send_native_card'].every((name) => names.includes(name));
     const toolMessages = request.messages.filter((message) => message.role === 'tool');
     let message;
-    if (toolMessages.length === 0) message = { role:'assistant', content:null, tool_calls:[{id:'write-1',type:'function',function:{name:'write_file',arguments:JSON.stringify({file_path:output,content:svg})}}] };
-    else if (toolMessages.length === 1) message = { role:'assistant', content:null, tool_calls:[{id:'send-1',type:'function',function:{name:'send_media',arguments:JSON.stringify({file:output,kind:'image'})}}] };
+    if (toolMessages.length === 0) message = { role:'assistant', content:null, tool_calls:[{id:'find-1',type:'function',function:{name:'find_tools',arguments:JSON.stringify({names:['run_python_script','render_image_card','send_native_card']})}}] };
+    else if (toolMessages.length === 1) message = { role:'assistant', content:null, tool_calls:[{id:'write-1',type:'function',function:{name:'write_file',arguments:JSON.stringify({file_path:output,content:svg})}}] };
+    else if (toolMessages.length === 2) message = { role:'assistant', content:null, tool_calls:[{id:'send-1',type:'function',function:{name:'send_media',arguments:JSON.stringify({file:output,kind:'image'})}}] };
     else message = { role:'assistant', content:'完成' };
     res.writeHead(200, {'Content-Type':'application/json'});
     res.end(JSON.stringify({id:`mock-${requests}`,object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message,finish_reason:message.tool_calls?'tool_calls':'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
@@ -38,6 +40,6 @@ try {
   await harness.receive({id:'input',conversationId:id,scope:'c2c',senderId:'user',content:'生成测试图片',timestamp:new Date().toISOString(),isMention:false,attachments:[]});
   const deadline=Date.now()+25000; while(sent.length<2 && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,100));
   const image=sent.find(item=>item.kind==='image');
-  if(!registered || !image || !fs.readFileSync(image.content).subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex'))) throw Error(`Agent 全链路失败，工具注册=${registered}，交付=${sent.map(x=>x.kind).join(',')}`);
-  console.log('真实 Deep Agents 工具调用链通过：绝对路径写入 → SVG 转 PNG → 模拟 QQ 交付；Python/卡片工具已注册');
+  if(!registered || !discovered || !image || !fs.readFileSync(image.content).subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex'))) throw Error(`Agent 全链路失败，基础工具=${registered}，发现工具=${discovered}，交付=${sent.map(x=>x.kind).join(',')}`);
+  console.log('真实 Deep Agents 工具调用链通过：按需发现工具 → 绝对路径写入 → SVG 转 PNG → 模拟 QQ 交付');
 } finally { harness.stop(); store.close(); await new Promise(resolve=>server.close(resolve)); }

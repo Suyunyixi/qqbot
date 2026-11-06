@@ -28,9 +28,56 @@ const { BalanceAlert, isBalanceError } = await import('../src/agent/balance-aler
 const { AttachmentArchive } = await import('../src/storage/attachments.js');
 const { doctor } = await import('../src/startup/doctor.js');
 const { memoryBudgetReached, pendingMemoryCharacters } = await import('../src/agent/memory-budget.js');
+const { QQGroupProfiles } = await import('../src/platform/qq/group-profiles.js');
+const { createToolDiscovery } = await import('../src/agent/tool-discovery.js');
+const { metricsMiddleware } = await import('../src/agent/metrics.js');
 function event(group:string,user:string,id:string): InboundEvent { return { id,conversationId:group,scope:'group',senderId:user,senderName:user,content:'消息',timestamp:new Date().toISOString(),isMention:false,attachments:[] }; }
 
 describe('全局用户记忆和创建者权限', () => {
+  it('工具目录仅发现当前允许的工具，预览目录不会全部启用', async () => {
+    const store=new Store(':memory:');const reply=new ReplyRuntime(store,{send:async()=>({})});const tasks=new TaskManager(store,async()=>'',async()=>{});
+    try {
+      store.setSetting('g','groupSettings',JSON.stringify({disabledTools:['inspect_media']}));
+      const tools=makeTools({conversationId:'g',scope:'group',store,reply,tasks,background:false});
+      const discovery=createToolDiscovery(tools,store,{conversationId:'g',scope:'group'},'你好');
+      const preview=JSON.parse(String(await discovery.finder.invoke({listAll:true,limit:100}))) as {activated:boolean;tools:Array<{name:string}>};
+      expect(preview.activated).toBe(false);expect(preview.tools.some((entry)=>entry.name==='inspect_media')).toBe(false);
+      expect(discovery.enabled.has('search_images')).toBe(false);
+      const denied=JSON.parse(String(await discovery.finder.invoke({names:['inspect_media'],limit:12,listAll:false}))) as {missing:string[]};
+      expect(denied.missing).toEqual(['inspect_media']);expect(discovery.enabled.has('inspect_media')).toBe(false);
+      await discovery.finder.invoke({names:['search_images'],limit:12,listAll:false});expect(discovery.enabled.has('search_images')).toBe(true);
+      const other=createToolDiscovery(tools,store,{conversationId:'g',scope:'group'},'你好');expect(other.enabled.has('search_images')).toBe(false);
+    } finally {tasks.stop();store.close();}
+  });
+  it('工具运行期间能看到进行中状态，完成后更新同一条记录', async () => {
+    const store=new Store(':memory:');let release!:()=>void;const waiting=new Promise<void>((resolve)=>{release=resolve});
+    try {
+      const middleware=metricsMiddleware(store,{conversationId:'g',scope:'group',taskId:'任务'},'后台任务','模拟模型');
+      const request={toolCall:{id:'call',name:'inspect_media',args:{}}};
+      const pending=Promise.resolve(middleware.wrapToolCall!(request as never,async()=>{await waiting;return new ToolMessage({tool_call_id:'call',content:'完成'});}));
+      expect(store.db.prepare("SELECT status FROM execution_metrics WHERE name='inspect_media'").get()).toEqual({status:'running'});
+      release();await pending;
+      expect(store.db.prepare("SELECT status FROM execution_metrics WHERE name='inspect_media'").all()).toEqual([{status:'success'}]);
+    } finally {release?.();store.close();}
+  });
+  it('异步获取群资料并缓存，不覆盖人工备注，失败保留上次成功结果', async () => {
+    const store=new Store(':memory:');
+    try {
+      store.record(event('测试群','成员','消息一'));
+      store.setSetting('测试群','groupSettings',JSON.stringify({label:'我的备注'}));
+      const fetch=vi.fn().mockResolvedValueOnce({group_name:'平台群名',group_member_num:23}).mockRejectedValueOnce(new Error('11253'));
+      const profiles=new QQGroupProfiles(store,fetch);
+      await Promise.all([profiles.refresh('测试群'),profiles.refresh('测试群')]);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(store.db.prepare('SELECT name,error FROM qq_group_profiles WHERE conversation_id=?').get('测试群')).toEqual({name:'平台群名',error:null});
+      expect(store.getSetting('测试群','groupSettings')).toContain('我的备注');
+      await profiles.refreshKnown();expect(fetch).toHaveBeenCalledTimes(1);
+      store.db.prepare('UPDATE qq_group_profiles SET last_attempt_at=? WHERE conversation_id=?').run('2000-01-01T00:00:00.000Z','测试群');
+      await profiles.refresh('测试群');
+      expect(store.db.prepare('SELECT name,error FROM qq_group_profiles WHERE conversation_id=?').get('测试群')).toEqual({name:'平台群名',error:'群资料接口返回 11253'});
+      await profiles.refresh('测试群');expect(fetch).toHaveBeenCalledTimes(2);
+    } finally {store.close();}
+  });
   it('按未整理内容占预算的百分比触发，超过两百条仍可统计', () => {
     const store=new Store(':memory:');
     try {
@@ -313,12 +360,12 @@ describe('完整媒体交付', () => {
     const file=path.join(workspaceFor('g-media'),'demo.bin');fs.writeFileSync(file,'sample');
     const taskId=store.addTask('g-media','group',undefined,'测试交付');store.setTask(taskId,'running');
     const tool=makeTools({conversationId:'g-media',scope:'group',store,reply,tasks,background:true,taskId}).find((x)=>x.name==='deliver_media')!;
-    const value=JSON.parse(String(await tool.invoke({source:file,format:'original',mode:'auto',note:'处理好了'}))) as {result:{delivered:boolean}};
-    expect(value.result.delivered).toBe(true);expect(delivered).toEqual(['file','text']);
+    const value=JSON.parse(String(await tool.invoke({source:file,format:'original',mode:'auto',note:'处理好了'}))) as {status:string;result:{delivered:boolean}};
+    expect(value.status).toBe('success');expect(value.result.delivered).toBe(true);expect(delivered).toEqual(['file','text']);
     const failedReply=new ReplyRuntime(store,{send:async()=>{throw Error('平台拒绝')}});
     const fail=makeTools({conversationId:'g-media',scope:'group',store,reply:failedReply,tasks,background:true,taskId:'other'}).find((x)=>x.name==='deliver_media')!;
-    const rejected=JSON.parse(String(await fail.invoke({source:file,format:'original',mode:'auto'}))) as {result:{delivered:boolean;error:string;path:string}};
-    expect(rejected.result.delivered).toBe(false);expect(rejected.result.error).toContain('平台拒绝');expect(fs.existsSync(rejected.result.path)).toBe(true);
+    const rejected=JSON.parse(String(await fail.invoke({source:file,format:'original',mode:'auto'}))) as {status:string;result:{delivered:boolean;error:string;path:string}};
+    expect(rejected.status).toBe('partial');expect(rejected.result.delivered).toBe(false);expect(rejected.result.error).toContain('平台拒绝');expect(fs.existsSync(rejected.result.path)).toBe(true);
     tasks.stop();store.close();
   });
 });

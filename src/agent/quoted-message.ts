@@ -12,3 +12,10 @@ export function quotedMessage(raw: unknown): string | undefined {
   });
   return texts.length ? texts.join('\n').slice(0, 4000) : undefined;
 }
+/** 只返回 QQ 事件明确提供的引用标识，不从文本猜测。 */
+export function quotedMessageId(raw:unknown):string|undefined {
+  if(!raw || typeof raw!=='object')return undefined;
+  const event=raw as {refMsgIdx?:unknown;raw?:{ref_msg_idx?:unknown}};
+  const id=event.refMsgIdx ?? event.raw?.ref_msg_idx;
+  return typeof id==='string' && id.trim()?id:undefined;
+}

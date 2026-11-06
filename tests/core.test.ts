@@ -167,6 +167,8 @@ describe('消息记录与触发', () => {
     store.record(event({id:'near-image',content:'',timestamp:new Date(now-21000).toISOString(),attachments:[{content_type:'image/png',url:'https://example.qq.com/p.png'}]}));
     expect(imageAttachments([],store.recent('group-a',10),'这个人',new Date(now).toISOString())).toHaveLength(1);
     expect(imageAttachments([],store.recent('group-a',10),'普通聊天',new Date(now+600000).toISOString())).toHaveLength(0);
+    store.record(event({id:'image-discussion',content:'你图片为什么加载不出来',timestamp:new Date(now+1000).toISOString()}));
+    expect(imageAttachments([],store.recent('group-a',10),'认真看下',new Date(now+30*86400000).toISOString())).toHaveLength(1);
     store.close();
     await expect(qqImageDataUrl(images[0]!)).rejects.toThrow('QQ 媒体地址');
     await expect(readPublicWebpage('http://127.0.0.1/')).rejects.toThrow('内网或本机');
@@ -181,6 +183,16 @@ describe('消息记录与触发', () => {
     const result = JSON.parse(String(await search!.invoke({ query: '项目' }))) as { result: Array<{ senderId: string }> };
     expect(result.result.map((row) => row.senderId).sort()).toEqual(['id-a', 'id-b']);
     tasks.stop(); store.close();
+  });
+  it('聊天记录搜索可以逐页查到更久以前的同关键词消息', async () => {
+    const store=new Store(':memory:');const reply=new ReplyRuntime(store,{send:async()=>({})});const tasks=new TaskManager(store,async()=>'',async()=>{});
+    try {
+      for(let i=0;i<25;i++)store.record(event({id:`history-page-${i}`,conversationId:'history-pages',content:`旧项目记录 ${i}`}));
+      const search=makeTools({conversationId:'history-pages',scope:'group',store,reply,tasks,background:false}).find((item)=>item.name==='search_chat_history')!;
+      const first=JSON.parse(String(await search.invoke({query:'旧项目'}))) as {result:Array<{sequence:number;content:string}>};
+      const next=JSON.parse(String(await search.invoke({query:'旧项目',before:first.result.at(-1)!.sequence}))) as {result:Array<{sequence:number;content:string}>};
+      expect(first.result).toHaveLength(20);expect(next.result).toHaveLength(5);expect(next.result.at(-1)?.content).toBe('旧项目记录 0');
+    } finally {tasks.stop();store.close();}
   });
 });
 
@@ -320,6 +332,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
   let port = 0;
   let fileToSend = '';
   let releaseInterjection: (() => void) | undefined;
+  let releaseQueued: (() => void) | undefined;
   let releaseReview: (() => void) | undefined;
   let releaseRecovery: (() => void) | undefined;
   let releaseSummary: (() => void) | undefined;
@@ -332,6 +345,12 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
         const parsed = JSON.parse(body) as { messages: Array<{ role: string; content?: unknown; name?: string; reasoning_content?: string }> };
         requests.push(parsed as unknown as Record<string, unknown>);
         if (req.url?.endsWith('/v1/messages')) {
+          const text=JSON.stringify(parsed.messages);
+          if(text.includes('兼容接口历史图片测试')) {
+            const content=text.includes('anthropic-image-read')?[{type:'text',text:text.includes('"type":"image"')?'已收到历史图片':'没有收到历史图片'}]:text.includes('anthropic-image-list')?[{type:'tool_use',id:'anthropic-image-read',name:'read_chat_image',input:{messageId:'anthropic-picture',index:0}}]:[{type:'tool_use',id:'anthropic-image-list',name:'list_chat_images',input:{}}];
+            res.writeHead(200,{'Content-Type':'application/json'});
+            res.end(JSON.stringify({id:`anthropic-test-${requests.length}`,type:'message',role:'assistant',model:'test-model',content,stop_reason:content[0]?.type==='tool_use'?'tool_use':'end_turn',stop_sequence:null,usage:{input_tokens:10,output_tokens:5}}));return;
+          }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ id: 'msg-test', type: 'message', role: 'assistant', model: 'test-model', content: [{ type: 'tool_use', id: 'probe-1', name: 'startup_probe', input: {} }], stop_reason: 'tool_use', stop_sequence: null, usage: { input_tokens: 10, output_tokens: 5 } }));
           return;
@@ -360,6 +379,9 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
           releaseInterjection = () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ id:'held',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:'旧答案'},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2} })); };
           return;
         }
+        if (allText.includes('队列首轮测试') && !allText.includes('队列次轮测试')) {
+          releaseQueued=()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({id:'queued-held',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:'上一轮刚刚发出的答复'},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}))};return;
+        }
         const asyncScenario = allText.includes('后台处理指定测试');
         const isChild = allText.includes('容器沙箱中的后台任务执行者');
         const callback = allText.includes('后台任务通知');
@@ -375,6 +397,12 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
         }
         let reply: Record<string, unknown>;
         if (allText.includes('工具死循环模拟')) reply={role:'assistant',content:null,tool_calls:[{id:`loop-${requests.length}`,type:'function',function:{name:'sandbox_capabilities',arguments:'{}'}}]};
+        else if (allText.includes('历史图片回查测试')) {
+          const toolMessages=parsed.messages.filter((message)=>message.role==='tool');
+          if(!toolMessages.some((message)=>message.name==='list_chat_images')) reply={role:'assistant',content:null,tool_calls:[{id:'image-list',type:'function',function:{name:'list_chat_images',arguments:'{}'}}]};
+          else if(!toolMessages.some((message)=>message.name==='read_chat_image')) reply={role:'assistant',content:null,tool_calls:[{id:'image-read',type:'function',function:{name:'read_chat_image',arguments:JSON.stringify({messageId:'history-picture',index:0})}}]};
+          else reply={role:'assistant',content:allText.includes('data:image/png;base64,')?'已读取历史图片':'没有收到图片'};
+        }
         else if (allText.includes('工具按需加载测试') && last?.role !== 'tool') reply={role:'assistant',content:null,tool_calls:[{id:'discover-test',type:'function',function:{name:'find_tools',arguments:JSON.stringify({names:['inspect_media']})}}]};
         else if (allText.includes('工具按需加载测试') && last?.name==='find_tools') reply={role:'assistant',content:null,tool_calls:[{id:'inspect-test',type:'function',function:{name:'inspect_media',arguments:JSON.stringify({input:'/不存在的测试文件'})}}]};
         else if (allText.includes('工具按需加载测试')) reply={role:'assistant',content:'已核实工具调用结果'};
@@ -542,6 +570,17 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(store.recent('group-focus',20).filter((row)=>row.direction==='in')).toHaveLength(5);
     harness.stop();store.close();
   },20000);
+  it('间隔很久后单独 @ 仍保留上一轮之后的发起人消息', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'delayed-focus'}}});
+    try {
+      const before=requests.length,now=Date.now();
+      await harness.receive(event({id:'delayed-text',conversationId:'delayed-focus',content:'这是我之前说的重要问题',timestamp:new Date(now-86400000).toISOString()}));
+      await harness.receive(event({id:'delayed-at',conversationId:'delayed-focus',content:'<@bot>',isMention:true,timestamp:new Date(now).toISOString()}));
+      await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+      const request=JSON.stringify(requests.slice(before).find((item)=>JSON.stringify(item.messages).includes('这是我之前说的重要问题'))?.messages);
+      expect(request).toContain('发起人在上一条机器人回复之后分段说的话');expect(request).toContain('这是我之前说的重要问题');
+    } finally {harness.stop();store.close();}
+  },20000);
   it('单独 @ 的多句对话漏掉明确互动时先复核再生成，只发送修正后的回复', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
     const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'reviewed'}}});const now=Date.now();const at=(n:number)=>new Date(now+n).toISOString();
@@ -664,7 +703,53 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       expect(text).toContain('data:image/png;base64,');expect(text).toContain('图片来源：之前聊天中可能相关');
       expect(text).toContain('苍蓝');expect(text).toContain('这他妈原价打完要20多w');
       expect(text).toContain('不要把图片不可读等同于没有收到群友发言');
+      expect(requests.slice(before).some((item)=>JSON.stringify(item.messages).includes('群聊答复语义复核器'))).toBe(false);
     } finally {fetchImage.mockRestore();harness.stop();store.close();}
+  },20000);
+  it('明确引用多年前的图片时，不会误选附近其他图片', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'quoted-image'}}});
+    const original=globalThis.fetch;const imageFetch=vi.spyOn(globalThis,'fetch').mockImplementation((input,init)=>String(input).startsWith('https://example.qq.com/')?Promise.resolve(new Response(Buffer.from(String(input).endsWith('old.png')?'old-image':'new-image'),{headers:{'content-type':'image/png'}})):original(input,init));
+    try {
+      await harness.receive(event({id:'quoted-old',conversationId:'quoted-image-group',content:'',timestamp:'2020-01-01T00:00:00Z',attachments:[{url:'https://example.qq.com/old.png',content_type:'image/png'}]}));
+      await vi.waitFor(()=>expect(store.db.prepare("SELECT status FROM message_attachments WHERE message_id='quoted-old'").get()).toMatchObject({status:'saved'}));
+      for(let i=0;i<65;i++)await harness.receive(event({id:`quoted-filler-${i}`,conversationId:'quoted-image-group',content:`消息 ${i}`}));
+      await harness.receive(event({id:'quoted-new',conversationId:'quoted-image-group',content:'',attachments:[{url:'https://example.qq.com/new.png',content_type:'image/png'}]}));
+      const before=requests.length;
+      await harness.receive(event({id:'quoted-request',conversationId:'quoted-image-group',content:'这里面是谁',isMention:true,raw:{refMsgIdx:'quoted-old'}}));
+      await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+      const request=JSON.stringify(requests.slice(before).find((item)=>JSON.stringify(item.messages).includes('这里面是谁'))?.messages);
+      expect(request).toContain(Buffer.from('old-image').toString('base64'));expect(request).not.toContain(Buffer.from('new-image').toString('base64'));
+    } finally {imageFetch.mockRestore();harness.stop();store.close();}
+  },20000);
+  it('很久以前且超出近期消息窗口的图片能自动回查并送入模型', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'history-image'}}});
+    const original=globalThis.fetch;let online=true;const imageFetch=vi.spyOn(globalThis,'fetch').mockImplementation((input,init)=>String(input).startsWith('https://example.qq.com/')?(online?Promise.resolve(new Response(Uint8Array.from([137,80,78,71]),{headers:{'content-type':'image/png'}})):Promise.reject(new Error('原地址已过期'))):original(input,init));
+    try {
+      const before=requests.length;
+      await harness.receive(event({id:'history-picture',conversationId:'history-image-group',content:'',timestamp:'2020-01-01T00:00:00Z',attachments:[{url:'https://example.qq.com/old.png',content_type:'image/png'}]}));
+      await vi.waitFor(()=>expect(store.db.prepare("SELECT status FROM message_attachments WHERE message_id='history-picture'").get()).toMatchObject({status:'saved'}));online=false;
+      for(let i=0;i<75;i++)await harness.receive(event({id:`history-filler-${i}`,conversationId:'history-image-group',content:`群聊 ${i}`}));
+      expect(requests).toHaveLength(before);
+      await harness.receive(event({id:'history-trigger',conversationId:'history-image-group',content:'历史图片回查测试',isMention:true}));
+      await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+      expect(delivered[0]?.content).toBe('已读取历史图片');
+      const calls=requests.slice(before).filter((item)=>JSON.stringify(item.messages).includes('历史图片回查测试'));
+      expect(calls.some((item)=>JSON.stringify(item.messages).includes('data:image/png;base64,'))).toBe(true);
+      expect(calls.some((item)=>JSON.stringify(item.messages).includes('history-picture'))).toBe(true);
+    } finally {imageFetch.mockRestore();harness.stop();store.close();}
+  },20000);
+  it('Anthropic 兼容接口也能接收回查的历史图片', async () => {
+    const previous=process.env.MODEL_PROVIDER;process.env.MODEL_PROVIDER='anthropic';
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'anthropic-image'}}});
+    const original=globalThis.fetch;let online=true;const imageFetch=vi.spyOn(globalThis,'fetch').mockImplementation((input,init)=>String(input).startsWith('https://example.qq.com/')?(online?Promise.resolve(new Response(Uint8Array.from([137,80,78,71]),{headers:{'content-type':'image/png'}})):Promise.reject(new Error('原地址已过期'))):original(input,init));
+    try {
+      await harness.receive(event({id:'anthropic-picture',conversationId:'anthropic-image-group',content:'',timestamp:'2020-01-01T00:00:00Z',attachments:[{url:'https://example.qq.com/anthropic.png',content_type:'image/png'}]}));
+      await vi.waitFor(()=>expect(store.db.prepare("SELECT status FROM message_attachments WHERE message_id='anthropic-picture'").get()).toMatchObject({status:'saved'}));online=false;
+      for(let i=0;i<75;i++)await harness.receive(event({id:`anthropic-filler-${i}`,conversationId:'anthropic-image-group',content:`群聊 ${i}`}));
+      await harness.receive(event({id:'anthropic-trigger',conversationId:'anthropic-image-group',content:'兼容接口历史图片测试',isMention:true}));
+      await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+      expect(delivered[0]?.content).toBe('已收到历史图片');
+    } finally {imageFetch.mockRestore();harness.stop();store.close();if(previous===undefined)delete process.env.MODEL_PROVIDER;else process.env.MODEL_PROVIDER=previous;}
   },20000);
   it('Deep Agents 内部子助手不能直接调用消息发送或人格修改工具', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
@@ -681,10 +766,10 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect((store.db.prepare("SELECT COUNT(*) AS n FROM execution_metrics WHERE conversation_id='group-internal' AND phase='内部子助手'").get() as {n:number}).n).toBeGreaterThan(0);
     harness.stop();store.close();
   },20000);
-  it('需要最新排行时，模型不查来源就作答会被拦截并如实说明', async () => {
+  it('明确要求联网查最新排行时，模型不查来源就作答会被拦截并如实说明', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
     const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'qq-research'}}});
-    await harness.receive(event({id:'research-gate',conversationId:'group-research-gate',content:'给我最新排行',isMention:true}));
+    await harness.receive(event({id:'research-gate',conversationId:'group-research-gate',content:'联网查一下最新排行',isMention:true}));
     await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
     expect(delivered[0]?.content).toContain('没有取得能核对的来源原文');
     expect(delivered[0]?.content).not.toContain('NAS');
@@ -707,6 +792,18 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(requests.length).toBe(before+2);
     harness.stop();store.close();
   },20000);
+  it('排队触发的下一轮看到上一轮在等待期间发出的答复', async () => {
+    const store=new Store(':memory:');const sent:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{sent.push(item);return {id:`queued-${sent.length}`}}});
+    try {
+      releaseQueued=undefined;const before=requests.length;
+      await harness.receive(event({id:'queued-first',conversationId:'queued-context',content:'队列首轮测试',isMention:true}));
+      await vi.waitFor(()=>expect(releaseQueued).toBeDefined(),{timeout:15000});
+      await harness.receive(event({id:'queued-second',conversationId:'queued-context',content:'队列次轮测试',isMention:true}));
+      releaseQueued!();await vi.waitFor(()=>expect(sent.length).toBe(2),{timeout:15000});
+      const second=requests.slice(before).find((item)=>JSON.stringify(item.messages).includes('队列次轮测试'));
+      const context=JSON.stringify(second?.messages);expect(context).toContain('上一轮刚刚发出的答复');expect(context).toContain('发生在当前消息之后');
+    } finally {harness.stop();store.close();}
+  },20000);
   it('积累静默消息后先回复，后台整理摘要并保留全部原文', async () => {
     const store = new Store(':memory:');
     const delivered: DeliveryItem[] = [];
@@ -724,6 +821,17 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(store.summary('group-long')?.summary).toContain('长期项目');
     harness.stop(); store.close();
   }, 20000);
+  it('单条超长消息分段整理完整内容后才推进摘要位置', async () => {
+    const store=new Store(':memory:');const runtime=new AgentRuntime(store);
+    try {
+      store.record(event({id:'long-single',conversationId:'long-summary',content:`${'甲'.repeat(10000)}中间标记${'乙'.repeat(10000)}尾部标记`}));
+      const before=requests.length,through=store.maxSeq('long-summary');
+      expect(await (runtime as unknown as {updateMemory:(id:string,seq:number)=>Promise<boolean>}).updateMemory('long-summary',through)).toBe(true);
+      const calls=requests.slice(before).map((item)=>JSON.stringify(item.messages));
+      expect(calls.length).toBeGreaterThan(1);expect(calls.some((item)=>item.includes('中间标记'))).toBe(true);expect(calls.some((item)=>item.includes('尾部标记'))).toBe(true);
+      expect(store.summary('long-summary')?.through_seq).toBe(through);expect(store.recent('long-summary',1)[0]?.content.endsWith('尾部标记')).toBe(true);
+    } finally {store.close();}
+  },20000);
   it('先提出最新问题再单独艾特，仍须查证，静默消息不调用模型', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'research-bare'}}});
     const now=Date.now();const before=requests.length;

@@ -118,6 +118,20 @@ export class AttachmentArchive {
     }
     return qqImageDataUrl(item);
   }
+  async messageImageDataUrl(conversationId:string,messageId:string,index:number):Promise<string> {
+    const local=this.file(conversationId,messageId,index);
+    if(local && fs.existsSync(local.path)) {
+      if(!['image/png','image/jpeg','image/gif','image/webp'].includes(local.mediaType))throw new Error('不支持该图片格式');
+      if(fs.statSync(local.path).size>10*1024*1024)throw new Error('图片已保存，但超过模型输入的 10MB 限制');
+      return `data:${local.mediaType};base64,${fs.readFileSync(local.path).toString('base64')}`;
+    }
+    const row=this.store.db.prepare('SELECT attachments FROM messages WHERE conversation_id=? AND id=?').get(conversationId,messageId) as {attachments:string}|undefined;
+    if(!row)throw new Error('找不到图片所属的消息');
+    let item:Partial<ImageAttachment>|undefined;
+    try {const entries=JSON.parse(row.attachments) as unknown;item=Array.isArray(entries)?entries[index] as Partial<ImageAttachment>|undefined:undefined;} catch {throw new Error('图片附件信息无法解析');}
+    if(!item || typeof item.url!=='string')throw new Error('图片文件未找到，也没有可用的原始地址');
+    return this.imageDataUrl({url:item.url,content_type:item.content_type ?? 'application/octet-stream'});
+  }
   file(conversationId:string,messageId:string,index:number):{path:string;mediaType:string}|undefined {
     const row=this.store.db.prepare("SELECT relative_path,media_type FROM message_attachments WHERE conversation_id=? AND message_id=? AND attachment_index=? AND status='saved'").get(conversationId,messageId,index) as {relative_path:string;media_type:string}|undefined;
     if(!row)return undefined;

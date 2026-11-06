@@ -57,10 +57,10 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
   const observeSearch=(entry:{started:number;status:'success'|'failed';usage?:{input_tokens:number;output_tokens:number;total_tokens:number}})=>recordMetric(ctx.store,{conversationId:ctx.conversationId,scope:ctx.scope,taskId:ctx.taskId},'联网搜索','DeepSeek 搜索',entry.started,entry.usage,entry.status);
   const tools: StructuredToolInterface[] = [
     tool(wrap(async () => ({ sandbox: 'docker-container', workspace: workspaceFor(ctx.conversationId), permissions: readConfig().sandbox.permissions, toolPermissions })), { name: 'sandbox_capabilities', description: '查看当前容器沙箱、会话工作目录和工具权限；主机上的工作区由管理员映射。', schema: z.object({}) }),
-    tool(wrap(async ({ query }: { query: string }) => {
-      const rows = ctx.store.search(ctx.conversationId, query, 20);
-      return rows.map((row) => ({ senderId: row.sender_id, senderName: row.sender_name, time: row.timestamp, content: row.content }));
-    }), { name: 'search_chat_history', description: '按关键词搜索当前会话的历史原文，返回发言人和时间。', schema: z.object({ query: z.string().min(1).max(200) }) }),
+    tool(wrap(async ({ query,before }: { query: string;before?:number }) => {
+      const rows = ctx.store.search(ctx.conversationId, query, 20,before);
+      return rows.map((row) => ({ sequence:row.seq,messageId:row.id,senderId: row.sender_id, senderName: row.sender_name, time: row.timestamp, content: row.content }));
+    }), { name: 'search_chat_history', description: '按关键词搜索当前会话历史原文，返回消息序号、发言人和时间；可用本页最小序号作为 before 查找更早记录，不受时间限制。', schema: z.object({ query: z.string().min(1).max(200),before:z.number().int().positive().optional() }) }),
     tool(wrap(async ({ query, queries, range }: { query?: string; queries?: string[]; range: 'any'|'day'|'week'|'month'|'year' }) => searchWeb([...(query?[query]:[]),...(queries??[])],{range,observe:observeSearch})), { name: 'web_search', description: '真实联网搜索，支持多个关键词和时间范围，返回来源链接、发布时间、查询时间及 provider 状态；先思考检索方向，再查证原文；空结果不代表事实。', schema: z.object({ query: z.string().min(1).max(500).optional(), queries: z.array(z.string().min(1).max(500)).max(4).optional(), range: z.enum(['any','day','week','month','year']).default('any') }) }),
     tool(wrap(async ({ queries, range }: { queries:string[]; range:'any'|'day'|'week'|'month'|'year' }) => researchWeb(queries, range,observeSearch)), { name:'research_web', description:'思考后并行检索多个方向并读取来源原文，返回搜索来源、发布时间、查询时间和读取失败；适合最新信息、版本、争议排行榜和需要交叉验证的问题。', schema:z.object({queries:z.array(z.string().min(1).max(500)).min(1).max(4),range:z.enum(['any','day','week','month','year']).default('any')}) }),
     tool(wrap(async ({ query }: { query:string }) => searchWeb([query],{category:'images',observe:observeSearch})), { name:'search_images', description:'联网搜索图片素材，返回图片地址、原网页和来源信息；用 download_file 保存需要的素材。', schema:z.object({query:z.string().min(1).max(500)}) }),

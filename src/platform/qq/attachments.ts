@@ -14,14 +14,16 @@ export function voiceTranscripts(items: unknown[]): string[] {
 export function imageAttachments(current: unknown[], recent: MessageRow[], content: string, timestamp?:string, windowSeconds=180): Attachment[] {
   let selected = typed(current).filter((a) => a.content_type?.toLowerCase().startsWith('image/') && a.url);
   const explicitReference=/图片|照片|截图|上面|上张|这张|看看|图里/.test(content);
+  const eventTime=timestamp?Date.parse(timestamp):NaN;
+  const recentImageDiscussion=recent.slice(-8).some((row)=>/图片|照片|截图|那张图|这张图|图像/.test(row.content));
   if (!selected.length && (explicitReference || timestamp)) {
-    const eventTime=timestamp?Date.parse(timestamp):NaN;
     let distance=0;
     for (const row of [...recent].reverse()) {
       distance++;
       const age=(eventTime-Date.parse(row.timestamp))/1000;
       const nearby=Number.isFinite(age) && age>=-60 && age<=windowSeconds && distance<=8;
-      if(!explicitReference && !nearby)continue;
+      const ongoing=recentImageDiscussion;
+      if(!explicitReference && !nearby && !ongoing)continue;
       try { selected = typed(JSON.parse(row.attachments) as unknown[]).filter((a) => a.content_type?.toLowerCase().startsWith('image/') && a.url); } catch { /* 兼容早期格式异常的附件信息。 */ }
       if (selected.length) break;
     }

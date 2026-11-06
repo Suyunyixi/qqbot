@@ -29,11 +29,11 @@ export function conversationFocus(recent: MessageRow[], event: InboundEvent, win
   return { rows, background:recent.filter((row)=>!focused.has(row.seq)), mentionOnly };
 }
 
-export function formatConversationFocus(rows: MessageRow[]): string {
+export function formatConversationFocus(rows: MessageRow[], markRecent=true): string {
   return rows.map((row)=>{
     const speaker=row.direction==='out'?'机器人':`${row.sender_name || '群友'} [${row.sender_id}]`;
     const content=row.content.length>700?`${row.content.slice(0,350)} … [本条节选，完整原文见历史] … ${row.content.slice(-250)}`:row.content;
     const attachments=row.attachments==='[]'?'':` 附件信息：${attachmentSummary(row.attachments).slice(0,300)}`;
-    return `[${row.timestamp} · 近期互动] ${speaker}：${content}${attachments}`;
+    return `[${row.timestamp}${markRecent?' · 近期互动':''}] ${speaker}：${content}${attachments}`;
   }).join('\n');
 }

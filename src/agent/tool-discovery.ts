@@ -7,7 +7,7 @@ import type { Scope } from '../domain/types.js';
 import { describeTool, type ToolCatalogEntry } from '../tools/catalog.js';
 
 type Identity={conversationId:string;scope:Scope;taskId?:string};
-const common=new Set(['find_tools','sandbox_capabilities','search_chat_history','remember_fact','web_search','research_web','read_webpage','current_time','start_background_task','send_text','send_media']);
+const common=new Set(['find_tools','sandbox_capabilities','search_chat_history','list_chat_images','read_chat_image','remember_fact','web_search','research_web','read_webpage','current_time','start_background_task','send_text','send_media']);
 const workerCommon=new Set(['ask_user','report_progress','deliver_media']);
 const aliases:Record<string,string>={download_media:'b站 bilibili 视频 下载',deliver_media:'b站 bilibili 视频 音频 下载 转换 发送 交付 mp3 mp4',extract_audio:'视频 音频 转换 mp3 提取',inspect_media:'媒体 视频 音频 格式 大小 时长',search_images:'图片 立绘 素材 搜索',render_image_card:'图片 海报 卡片 制作 排版',run_python_script:'代码 脚本 绘图 图片 制作 处理',run_shell_command:'命令 代码 下载 脚本 处理',send_native_card:'qq 卡片 链接 榜单',send_media:'发送 图片 视频 音频 文件',find_tools:'查找 工具 能力 目录'};
 

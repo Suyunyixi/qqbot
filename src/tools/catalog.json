@@ -183,5 +183,15 @@
     "category": "工具目录",
     "label": "查找工具",
     "description": "按需求查找并启用相关工具，支持查看完整目录。"
+  },
+  "list_chat_images": {
+    "category": "记忆与会话",
+    "label": "查询历史图片",
+    "description": "按时间和发言人查找当前会话的历史图片及归档状态。"
+  },
+  "read_chat_image": {
+    "category": "记忆与会话",
+    "label": "读取历史图片",
+    "description": "按消息和附件序号读取已保存的历史图片，供模型理解。"
   }
 }

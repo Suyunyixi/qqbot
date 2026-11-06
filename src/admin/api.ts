@@ -93,9 +93,9 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
       try {for(const background of [false,true])for(const item of makeTools({conversationId:'_catalog',scope:'c2c',store:probe,reply,tasks,background,taskId:background?'catalog':undefined})) {
         const entry=describeTool(item,true);const index=entries.findIndex((existing)=>existing.name===entry.name);if(index>=0)entries[index]=entry;else if(entry.source!=='内置')entries.push(entry);
       }} catch(error){pluginError=error instanceof Error?error.message:String(error);} finally {tasks.stop();probe.close();}
-      const catalog=entries.map((entry)=>{const feature=toolFeature[entry.name];const missing=entry.permissions.filter((permission)=>!config.sandbox.permissions[permission]);return {...entry,status:feature && !config.tools[feature]?'全局已关闭':missing.length?'缺少沙箱权限':'已启用，实际可用性取决于依赖和平台权限',missing};});
+      const catalog=entries.map((entry)=>{const feature=toolFeature[entry.name];const missing=entry.permissions.filter((permission)=>!config.sandbox.permissions[permission]);const localImage=['list_chat_images','read_chat_image'].includes(entry.name);const status=localImage?(entry.name==='read_chat_image' && !config.model.vision?'当前模型未启用图片理解':'可查询当前会话记录，无需额外授权'):feature && !config.tools[feature]?'全局已关闭':missing.length?'缺少沙箱权限':'已启用，实际可用性取决于依赖和平台权限';return {...entry,status,missing};});
       const requirements=Object.fromEntries(catalog.map((entry)=>[entry.name,entry.permissions]));
-      json(res,200,{tools:catalog.filter((entry)=>entry.name!=='find_tools').map((entry)=>entry.name),requirements,catalog,pluginError});return;
+      json(res,200,{tools:catalog.filter((entry)=>!['find_tools','list_chat_images','read_chat_image'].includes(entry.name)).map((entry)=>entry.name),requirements,catalog,pluginError});return;
     }
     if (req.method === 'GET' && url.pathname === '/api/tool-activity') {
       const discoveries=store.db.prepare('SELECT conversation_id,scope,task_id,query,candidates,created_at,kind FROM tool_discoveries ORDER BY seq DESC LIMIT 100').all();

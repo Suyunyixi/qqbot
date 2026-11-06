@@ -85,7 +85,7 @@ Agent 检查点中的图片内容单独保存在 `BOT_DATA_HOST/attachments/chec
 
 `.env` 中的 `SEARCH_PROVIDER=auto` 会在使用 DeepSeek 官方模型地址时优先使用其结构化联网搜索，其余情况使用 SearXNG；也可指定 `deepseek` 或 `searxng`。DeepSeek 搜索由 `DEEPSEEK_SEARCH_BASE_URL` 和 `DEEPSEEK_SEARCH_MODEL` 配置。搜索结果需要读取原文和核对时间；DeepSeek 搜索本身不保证强制时间范围过滤。图片搜索优先尝试 SearXNG，无法获得图片时会搜索来源网页并提取图片链接，仍需要核对素材是否符合要求。联网搜索实现参考 [DeepSeek Harness 的搜索插件](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/web/web-search-deepseek)。
 
-明确要求最新、热门、实时或排行时，Harness 要求读取至少一个来源原文，否则不直接输出未经核实的结论。模型仍需判断来源的相关性和时效，系统不能保证识别每个隐含的时效问题或保证来源本身正确。
+明确要求联网查证最新信息时，Harness 要求读取至少一个来源原文，否则不直接输出未经核实的结论；单独出现“最新”等词不会机械阻断本地聊天或文件操作。其他时效问题由模型结合语义决定检索。模型仍需判断来源的相关性和时效，系统不能保证识别每个隐含的时效问题或保证来源本身正确。
 
 回复使用 QQ SDK 的原生 `sendMarkdown`（参考 [DSH QQ 出站实现](https://github.com/tencent-connect/dsh-qqbot/blob/main/src/transport/outbound.ts)），代码块跨长消息分段时重新闭合。QQ 账号是否具备 Markdown 渲染能力以及不同客户端的呈现应以实际平台返回和客户端为准；发送失败会记录，不能当作已成功渲染。默认启用搜索和媒体下载。语音方案待定，当前默认关闭，不安装或启用语音合成服务。
 

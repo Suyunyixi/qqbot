@@ -31,9 +31,24 @@ const { memoryBudgetReached, pendingMemoryCharacters } = await import('../src/ag
 const { QQGroupProfiles } = await import('../src/platform/qq/group-profiles.js');
 const { createToolDiscovery } = await import('../src/agent/tool-discovery.js');
 const { metricsMiddleware } = await import('../src/agent/metrics.js');
+const { historyImageTools } = await import('../src/agent/history-images.js');
 function event(group:string,user:string,id:string): InboundEvent { return { id,conversationId:group,scope:'group',senderId:user,senderName:user,content:'消息',timestamp:new Date().toISOString(),isMention:false,attachments:[] }; }
 
 describe('全局用户记忆和创建者权限', () => {
+  it('能回看机器人发出的本地图片，不会读取其他会话的消息', async () => {
+    const store=new Store(':memory:');
+    try {
+      const file=path.join(workspaceFor('图片所属会话'),'自己的图片.png');fs.writeFileSync(file,Buffer.from('模拟图片'));
+      store.recordSent({id:'own-image',conversationId:'图片所属会话',scope:'group',kind:'image',content:file},'own-image');
+      const archive=new AttachmentArchive(store);
+      const tools=historyImageTools(store,archive,'图片所属会话',true);
+      const ok=JSON.parse(String(await tools.tools[1]!.invoke({messageId:'own-image',index:0}))) as {ok:boolean};
+      expect(ok.ok).toBe(true);
+      const other=historyImageTools(store,archive,'其他会话',true);
+      const denied=JSON.parse(String(await other.tools[1]!.invoke({messageId:'own-image',index:0}))) as {ok:boolean;error:string};
+      expect(denied.ok).toBe(false);expect(denied.error).toContain('当前会话');
+    } finally {store.close();}
+  });
   it('工具目录仅发现当前允许的工具，预览目录不会全部启用', async () => {
     const store=new Store(':memory:');const reply=new ReplyRuntime(store,{send:async()=>({})});const tasks=new TaskManager(store,async()=>'',async()=>{});
     try {
@@ -372,7 +387,10 @@ describe('完整媒体交付', () => {
 
 describe('DSH 同款结构化联网搜索', () => {
   it('最新请求要求读取真实原文，空结果和错误不能当作证据', () => {
-    expect(needsCurrentResearch('给我最新强度榜')).toBe(true);expect(needsCurrentResearch('今天心情不错')).toBe(false);
+    expect(needsCurrentResearch('给我最新强度榜')).toBe(false);expect(needsCurrentResearch('联网查一下最新强度榜')).toBe(true);expect(needsCurrentResearch('今天心情不错')).toBe(false);
+    expect(needsCurrentResearch('把刚才那张最新的图片发出来')).toBe(false);
+    expect(needsCurrentResearch('查一下我发的最新图片')).toBe(false);
+    expect(needsCurrentResearch('联网查一下上面的最新版本')).toBe(true);
     const msg=(content:string)=>new ToolMessage({tool_call_id:'1',name:'research_web',content});
     expect(hasEvidence(msg(JSON.stringify({ok:true,result:{reads:[]}})))).toBe(false);
     expect(hasEvidence(msg(JSON.stringify({ok:false,error:'失败'})))).toBe(false);

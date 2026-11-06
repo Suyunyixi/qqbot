@@ -3,8 +3,10 @@ import { createMiddleware } from 'langchain';
 
 /** Explicitly time-sensitive research must read at least one real source. */
 export function needsCurrentResearch(text:string):boolean {
-  return /最新|实时|排行榜|热榜|热门|强度榜|版本更新/.test(text)
-    || (/(今天|今日|今年|近期|本周|本月)/.test(text) && /(排行|新闻|价格|赛事|比赛|活动|版本|更新|资讯|数据|天气)/.test(text));
+  if (/(刚才|上一条|上面|前面|群聊|聊天记录|本群|你发的|我发的|那张|这张)/.test(text) && !/(联网|上网|网络|网页|官网|官方资料|搜索引擎)/.test(text)) return false;
+  const explicitSearch=/(联网|上网|搜索|搜一下|搜搜|查一下|查查|查询|查证|核实)/.test(text);
+  const current=/(最新|实时|排行榜|热榜|热门|强度榜|版本更新|今天|今日|今年|近期|本周|本月)/.test(text);
+  return explicitSearch && current && !(/(群聊|聊天记录|本群)/.test(text) && !/(联网|上网|网页|网络)/.test(text));
 }
 export function hasEvidence(message:unknown):boolean {
   if(!(message instanceof ToolMessage) || !['read_webpage','research_web'].includes(message.name ?? '')) return false;

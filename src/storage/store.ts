@@ -196,9 +196,9 @@ export class Store {
   setSetting(conversationId: string, key: string, value: string): void {
     this.db.prepare('INSERT INTO conversation_settings VALUES (?,?,?) ON CONFLICT(conversation_id,key) DO UPDATE SET value=excluded.value').run(conversationId, key, value);
   }
-  search(conversationId: string, query: string, limit = 20): MessageRow[] {
+  search(conversationId: string, query: string, limit = 20, before = Number.MAX_SAFE_INTEGER): MessageRow[] {
     const q = query.replace(/[%_\\]/g, '\\$&');
-    return this.db.prepare("SELECT * FROM messages WHERE conversation_id=? AND content LIKE ? ESCAPE '\\' ORDER BY seq DESC LIMIT ?").all(conversationId, `%${q}%`, limit) as MessageRow[];
+    return this.db.prepare("SELECT * FROM messages WHERE conversation_id=? AND seq<? AND content LIKE ? ESCAPE '\\' ORDER BY seq DESC LIMIT ?").all(conversationId, before, `%${q}%`, limit) as MessageRow[];
   }
   summary(conversationId: string): { summary: string; through_seq: number } | undefined {
     return this.db.prepare('SELECT summary,through_seq FROM summaries WHERE conversation_id=?').get(conversationId) as { summary: string; through_seq: number } | undefined;

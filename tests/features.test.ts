@@ -18,7 +18,6 @@ const { handleAdmin } = await import('../src/admin/api.js');
 const { searchWeb } = await import('../src/tools/search.js');
 const { recentSocialContext } = await import('../src/agent/social-context.js');
 const { recentActivityMarker } = await import('../src/agent/social-context.js');
-const { hasEvidence, needsCurrentResearch } = await import('../src/agent/research-gate.js');
 const { capabilityManifest } = await import('../src/agent/capabilities.js');
 const { quotedMessage } = await import('../src/agent/quoted-message.js');
 const { internalSubagentTools } = await import('../src/agent/subagent-policy.js');
@@ -386,16 +385,6 @@ describe('完整媒体交付', () => {
 });
 
 describe('DSH 同款结构化联网搜索', () => {
-  it('最新请求要求读取真实原文，空结果和错误不能当作证据', () => {
-    expect(needsCurrentResearch('给我最新强度榜')).toBe(false);expect(needsCurrentResearch('联网查一下最新强度榜')).toBe(true);expect(needsCurrentResearch('今天心情不错')).toBe(false);
-    expect(needsCurrentResearch('把刚才那张最新的图片发出来')).toBe(false);
-    expect(needsCurrentResearch('查一下我发的最新图片')).toBe(false);
-    expect(needsCurrentResearch('联网查一下上面的最新版本')).toBe(true);
-    const msg=(content:string)=>new ToolMessage({tool_call_id:'1',name:'research_web',content});
-    expect(hasEvidence(msg(JSON.stringify({ok:true,result:{reads:[]}})))).toBe(false);
-    expect(hasEvidence(msg(JSON.stringify({ok:false,error:'失败'})))).toBe(false);
-    expect(hasEvidence(msg(JSON.stringify({ok:true,result:{reads:[{document:{text:'来源正文'}}]}})))).toBe(true);
-  });
   it('只使用原生 web_search_tool_result 来源并保留发布时间', async () => {
     const old={base:process.env.MODEL_BASE_URL,key:process.env.MODEL_API_KEY,provider:process.env.SEARCH_PROVIDER};process.env.MODEL_BASE_URL='https://api.deepseek.com';process.env.MODEL_API_KEY='test-key';process.env.SEARCH_PROVIDER='deepseek';
     const spy=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(JSON.stringify({usage:{input_tokens:12,output_tokens:7},content:[{type:'text',text:'不能当作来源'},{type:'web_search_tool_result',content:[{type:'web_search_result',url:'https://example.com/source',title:'来源',page_age:'2026-11-01'}]}]}),{status:200}));

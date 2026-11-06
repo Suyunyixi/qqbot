@@ -6,29 +6,20 @@ export function attachmentSummary(value:unknown):string {
   let items=value;
   if(typeof value==='string')try {items=JSON.parse(value) as unknown;} catch {return '附件信息无法解析';}
   if(!Array.isArray(items))return '';
-  return typed(items).map((item)=>({类型:item.content_type ?? '未知',文件名:item.filename ?? '',语音文本:item.asr_refer_text ?? ''})).map((item)=>JSON.stringify(item)).join('；');
+  return items.flatMap((value,index)=>value && typeof value==='object'?[{序号:index,类型:(value as Attachment).content_type ?? '未知',文件名:(value as Attachment).filename ?? '',语音文本:(value as Attachment).asr_refer_text ?? ''}]:[]).map((item)=>JSON.stringify(item)).join('；');
 }
 export function voiceTranscripts(items: unknown[]): string[] {
   return typed(items).map((a) => a.asr_refer_text?.trim()).filter((x): x is string => !!x);
 }
-export function imageAttachments(current: unknown[], recent: MessageRow[], content: string, timestamp?:string, windowSeconds=180): Attachment[] {
+export function imageAttachments(current: unknown[], recent: MessageRow[], _content: string, _timestamp?:string, _windowSeconds=180): Attachment[] {
   let selected = typed(current).filter((a) => a.content_type?.toLowerCase().startsWith('image/') && a.url);
-  const explicitReference=/图片|照片|截图|上面|上张|这张|看看|图里/.test(content);
-  const eventTime=timestamp?Date.parse(timestamp):NaN;
-  const recentImageDiscussion=recent.slice(-8).some((row)=>/图片|照片|截图|那张图|这张图|图像/.test(row.content));
-  if (!selected.length && (explicitReference || timestamp)) {
-    let distance=0;
-    for (const row of [...recent].reverse()) {
-      distance++;
-      const age=(eventTime-Date.parse(row.timestamp))/1000;
-      const nearby=Number.isFinite(age) && age>=-60 && age<=windowSeconds && distance<=8;
-      const ongoing=recentImageDiscussion;
-      if(!explicitReference && !nearby && !ongoing)continue;
-      try { selected = typed(JSON.parse(row.attachments) as unknown[]).filter((a) => a.content_type?.toLowerCase().startsWith('image/') && a.url); } catch { /* 兼容早期格式异常的附件信息。 */ }
-      if (selected.length) break;
+  if (!selected.length) {
+    let lastReply=-1;for(let i=recent.length-1;i>=0;i--)if(recent[i]!.direction==='out'){lastReply=i;break;}
+    for (const row of recent.slice(lastReply+1)) {
+      try { selected.push(...typed(JSON.parse(row.attachments) as unknown[]).filter((a) => a.content_type?.toLowerCase().startsWith('image/') && a.url)); } catch { /* 兼容早期格式异常的附件信息。 */ }
     }
   }
-  return selected.slice(0, 3);
+  return selected.slice(-3);
 }
 export async function qqAttachmentResponse(attachment: Attachment,timeoutMs=20000): Promise<Response> {
   const raw = attachment.url ?? '';

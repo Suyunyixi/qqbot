@@ -193,5 +193,15 @@
     "category": "记忆与会话",
     "label": "读取历史图片",
     "description": "按消息和附件序号读取已保存的历史图片，供模型理解。"
+  },
+  "read_chat_history": {
+    "category": "记忆与会话",
+    "label": "翻阅聊天记录",
+    "description": "按发言顺序翻阅当前会话的原始消息和附件线索。"
+  },
+  "read_chat_message": {
+    "category": "记忆与会话",
+    "label": "读取完整消息",
+    "description": "查看某条历史消息的原文；长消息可分段读取。"
   }
 }

@@ -166,7 +166,7 @@ describe('消息记录与触发', () => {
     const store=new Store(':memory:');const now=Date.now();
     store.record(event({id:'near-image',content:'',timestamp:new Date(now-21000).toISOString(),attachments:[{content_type:'image/png',url:'https://example.qq.com/p.png'}]}));
     expect(imageAttachments([],store.recent('group-a',10),'这个人',new Date(now).toISOString())).toHaveLength(1);
-    expect(imageAttachments([],store.recent('group-a',10),'普通聊天',new Date(now+600000).toISOString())).toHaveLength(0);
+    expect(imageAttachments([],store.recent('group-a',10),'普通聊天',new Date(now+600000).toISOString())).toHaveLength(1);
     store.record(event({id:'image-discussion',content:'你图片为什么加载不出来',timestamp:new Date(now+1000).toISOString()}));
     expect(imageAttachments([],store.recent('group-a',10),'认真看下',new Date(now+30*86400000).toISOString())).toHaveLength(1);
     store.close();
@@ -192,6 +192,20 @@ describe('消息记录与触发', () => {
       const first=JSON.parse(String(await search.invoke({query:'旧项目'}))) as {result:Array<{sequence:number;content:string}>};
       const next=JSON.parse(String(await search.invoke({query:'旧项目',before:first.result.at(-1)!.sequence}))) as {result:Array<{sequence:number;content:string}>};
       expect(first.result).toHaveLength(20);expect(next.result).toHaveLength(5);expect(next.result.at(-1)?.content).toBe('旧项目记录 0');
+    } finally {tasks.stop();store.close();}
+  });
+  it('不输入关键词也能顺序翻阅历史并分段读取长消息', async () => {
+    const store=new Store(':memory:');const reply=new ReplyRuntime(store,{send:async()=>({})});const tasks=new TaskManager(store,async()=>'',async()=>{});
+    try {
+      for(let i=0;i<6;i++)store.record(event({id:`history-browse-${i}`,conversationId:'browse',content:i===0?'甲'.repeat(7000)+'尾部':`群友消息${i}`}));
+      const tools=makeTools({conversationId:'browse',scope:'group',store,reply,tasks,background:false});
+      const history=tools.find((item)=>item.name==='read_chat_history')!,message=tools.find((item)=>item.name==='read_chat_message')!;
+      const first=JSON.parse(String(await history.invoke({limit:3}))) as {result:{messages:Array<{sequence:number}>;hasMore:boolean;nextBefore:number}};
+      const next=JSON.parse(String(await history.invoke({limit:3,before:first.result.nextBefore}))) as {result:{messages:Array<{messageId:string;contentTruncated:boolean}>;hasMore:boolean}};
+      expect(first.result.hasMore).toBe(true);expect(next.result.hasMore).toBe(false);expect(next.result.messages[0]).toMatchObject({messageId:'history-browse-0',contentTruncated:true});
+      const part=JSON.parse(String(await message.invoke({messageId:'history-browse-0',offset:6000}))) as {result:{content:string;nextOffset:number|null}};
+      expect(part.result.content.endsWith('尾部')).toBe(true);expect(part.result.nextOffset).toBeNull();
+      const denied=JSON.parse(String(await message.invoke({messageId:'不存在',offset:0}))) as {ok:boolean};expect(denied.ok).toBe(false);
     } finally {tasks.stop();store.close();}
   });
 });
@@ -397,6 +411,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
         }
         let reply: Record<string, unknown>;
         if (allText.includes('工具死循环模拟')) reply={role:'assistant',content:null,tool_calls:[{id:`loop-${requests.length}`,type:'function',function:{name:'sandbox_capabilities',arguments:'{}'}}]};
+        else if (allText.includes('视觉自主测试')) reply=allText.includes('data:image/png;base64,')?{role:'assistant',content:'已结合图片继续回答'}:{role:'assistant',content:null,tool_calls:[{id:'autonomous-image',type:'function',function:{name:'read_chat_image',arguments:JSON.stringify({messageId:'autonomous-picture',index:0})}}]};
         else if (allText.includes('历史图片回查测试')) {
           const toolMessages=parsed.messages.filter((message)=>message.role==='tool');
           if(!toolMessages.some((message)=>message.name==='list_chat_images')) reply={role:'assistant',content:null,tool_calls:[{id:'image-list',type:'function',function:{name:'list_chat_images',arguments:'{}'}}]};
@@ -493,7 +508,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(JSON.stringify(mainRequest?.messages)).toContain('小王');
     expect(JSON.stringify(mainRequest?.messages)).toContain('小王备注');
     expect(JSON.stringify(mainRequest?.messages)).toContain('负责存储设备');
-    expect(JSON.stringify(mainRequest?.messages)).toContain('近期互动');
+    expect(JSON.stringify(mainRequest?.messages)).toContain('当前已加载的聊天原文（按时间顺序');
     const modelMessages=mainRequest?.messages as Array<{role:string;content:unknown}>;
     const system=JSON.stringify(modelMessages.filter((message)=>message.role==='system'));
     const user=JSON.stringify(modelMessages.filter((message)=>message.role==='user'));
@@ -563,10 +578,10 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     await harness.receive(event({id:'focus-trigger',conversationId:'group-focus',senderId:'user-a',senderName:'甲',content:'<@bot>',isMention:true,timestamp:at(4000)}));
     await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
     const messages=requests.slice(before).find((request)=>!JSON.stringify(request.messages).includes('群聊答复语义复核器'))?.messages as Array<{role:string;content:unknown}>;
-    const content=String(messages.find((message)=>message.role==='user' && String(message.content).includes('本轮附近的连续对话'))?.content);
-    const focus=content.split('本轮附近的连续对话')[1]!.split('当前请求：')[0]!;
-    expect(focus).toContain('上一轮已经回答');expect(focus).toContain('甲 [user-a]：你就是大肥鱼啊');expect(focus).toContain('乙 [user-b]：另一位群友插话');expect(focus).toContain('甲 [user-a]：你不信问问其他人');
-    expect(focus).not.toContain('之前已经结束的讨论');expect(content).toContain('这次只有 @ 没有附带文字');
+    const content=String(messages.find((message)=>message.role==='user' && String(message.content).includes('当前已加载的聊天原文'))?.content);
+    const context=content.split('当前已加载的聊天原文')[1]!.split('当前请求：')[0]!;
+    expect(context).toContain('之前已经结束的讨论');expect(context).toContain('上一轮已经回答');expect(context).toContain('你就是大肥鱼啊');expect(context).toContain('另一位群友插话');expect(context).toContain('你不信问问其他人');
+    expect(content).toContain('这次只有 @ 没有附带文字');
     expect(store.recent('group-focus',20).filter((row)=>row.direction==='in')).toHaveLength(5);
     harness.stop();store.close();
   },20000);
@@ -667,6 +682,23 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       expect((store.db.prepare("SELECT COUNT(*) AS n FROM execution_metrics WHERE conversation_id='dynamic-group' AND name='inspect_media'").get() as {n:number}).n).toBe(1);
     } finally {harness.stop();store.close();}
   },20000);
+  it('模型根据连续聊天里的附件线索自主选择回看图片', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'autonomous-response'}}});
+    const original=globalThis.fetch;const imageFetch=vi.spyOn(globalThis,'fetch').mockImplementation((input,init)=>String(input).startsWith('https://example.qq.com/')?Promise.resolve(new Response(Buffer.from('测试图片'),{headers:{'content-type':'image/png'}})):original(input,init));
+    try {
+      await harness.receive(event({id:'autonomous-picture',conversationId:'autonomous-group',content:'',timestamp:'2020-01-01T00:00:00Z',attachments:[{url:'https://example.qq.com/autonomous.png',content_type:'image/png'}]}));
+      await vi.waitFor(()=>expect(store.db.prepare("SELECT status FROM message_attachments WHERE message_id='autonomous-picture'").get()).toMatchObject({status:'saved'}));
+      store.recordSent({id:'old-bot',conversationId:'autonomous-group',scope:'group',kind:'text',content:'我可能理解错了'},'old-bot');
+      const before=requests.length;
+      await harness.receive(event({id:'autonomous-trigger',conversationId:'autonomous-group',content:'视觉自主测试',isMention:true}));
+      await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+      const calls=requests.slice(before).filter((item)=>JSON.stringify(item.messages).includes('视觉自主测试'));
+      expect(JSON.stringify(calls[0]?.messages)).toContain('附件消息标识:autonomous-picture');
+      expect(JSON.stringify(calls[0]?.messages)).not.toContain('data:image/png;base64,');
+      expect(calls.some((item)=>JSON.stringify(item.messages).includes('data:image/png;base64,'))).toBe(true);
+      expect(delivered[0]?.content).toBe('已结合图片继续回答');
+    } finally {imageFetch.mockRestore();harness.stop();store.close();}
+  },20000);
   it('用户发来的图片作为有来源的素材传给模型，并保留主人格', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
     store.setPersona('测试人格：自然接话，认真回答问题。','system');
@@ -700,9 +732,9 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
       const request=requests.slice(before).find((item)=>JSON.stringify(item.messages).includes('大肥鱼说说这个吐脏话的人'));
       const text=JSON.stringify(request?.messages);
-      expect(text).toContain('data:image/png;base64,');expect(text).toContain('图片来源：之前聊天中可能相关');
+      expect(text).toContain('data:image/png;base64,');expect(text).toContain('图片来源：聊天记录中已加载的图片');
       expect(text).toContain('苍蓝');expect(text).toContain('这他妈原价打完要20多w');
-      expect(text).toContain('不要把图片不可读等同于没有收到群友发言');
+      expect(text).toContain('不要把当前消息无附件');
       expect(requests.slice(before).some((item)=>JSON.stringify(item.messages).includes('群聊答复语义复核器'))).toBe(false);
     } finally {fetchImage.mockRestore();harness.stop();store.close();}
   },20000);
@@ -766,13 +798,12 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect((store.db.prepare("SELECT COUNT(*) AS n FROM execution_metrics WHERE conversation_id='group-internal' AND phase='内部子助手'").get() as {n:number}).n).toBeGreaterThan(0);
     harness.stop();store.close();
   },20000);
-  it('明确要求联网查最新排行时，模型不查来源就作答会被拦截并如实说明', async () => {
+  it('本地对话中的最新图片不会被关键词规则强制联网', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
     const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'qq-research'}}});
-    await harness.receive(event({id:'research-gate',conversationId:'group-research-gate',content:'联网查一下最新排行',isMention:true}));
+    await harness.receive(event({id:'research-gate',conversationId:'group-research-gate',content:'把刚才那张最新图片给我看看',isMention:true}));
     await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
-    expect(delivered[0]?.content).toContain('没有取得能核对的来源原文');
-    expect(delivered[0]?.content).not.toContain('NAS');
+    expect(delivered[0]?.content).not.toContain('没有取得能核对的来源原文');
     harness.stop();store.close();
   },20000);
   it('正在处理时吸收群友插话，未触发消息本身不启动模型', async () => {
@@ -832,14 +863,14 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       expect(store.summary('long-summary')?.through_seq).toBe(through);expect(store.recent('long-summary',1)[0]?.content.endsWith('尾部标记')).toBe(true);
     } finally {store.close();}
   },20000);
-  it('先提出最新问题再单独艾特，仍须查证，静默消息不调用模型', async () => {
+  it('先提出问题再单独艾特，原话交由模型理解，静默消息不调用模型', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'research-bare'}}});
     const now=Date.now();const before=requests.length;
     expect(await harness.receive(event({id:'research-silent',conversationId:'group-research-bare',content:'查一下最新排行榜',timestamp:new Date(now+1000).toISOString()}))).toBe(false);
     expect(requests).toHaveLength(before);
     await harness.receive(event({id:'research-trigger',conversationId:'group-research-bare',content:'<@bot>',isMention:true,timestamp:new Date(now+2000).toISOString()}));
     await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
-    expect(delivered[0]?.content).toContain('没有取得能核对的来源原文');
+    expect(JSON.stringify(requests.slice(before).map((item)=>item.messages))).toContain('查一下最新排行榜');
     expect((store.db.prepare("SELECT COUNT(*) AS n FROM execution_metrics WHERE conversation_id='group-research-bare' AND phase='主回复'").get() as {n:number}).n).toBeGreaterThan(0);
     harness.stop();store.close();
   },20000);

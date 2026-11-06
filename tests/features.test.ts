@@ -27,9 +27,22 @@ const { conversationReview } = await import('../src/agent/conversation-review.js
 const { BalanceAlert, isBalanceError } = await import('../src/agent/balance-alert.js');
 const { AttachmentArchive } = await import('../src/storage/attachments.js');
 const { doctor } = await import('../src/startup/doctor.js');
+const { memoryBudgetReached, pendingMemoryCharacters } = await import('../src/agent/memory-budget.js');
 function event(group:string,user:string,id:string): InboundEvent { return { id,conversationId:group,scope:'group',senderId:user,senderName:user,content:'消息',timestamp:new Date().toISOString(),isMention:false,attachments:[] }; }
 
 describe('全局用户记忆和创建者权限', () => {
+  it('按未整理内容占预算的百分比触发，超过两百条仍可统计', () => {
+    const store=new Store(':memory:');
+    try {
+      for(let i=0;i<250;i++)store.record({...event('预算群','成员',`预算-${i}`),content:'一段聊天'});
+      const through=store.maxSeq('预算群');
+      const size=pendingMemoryCharacters(store,'预算群',0,through);
+      expect(size).toBe(250*(4+2+24));
+      expect(memoryBudgetReached(size,10000,75)).toBe(true);
+      expect(memoryBudgetReached(size-1,10000,75)).toBe(false);
+      expect(pendingMemoryCharacters(store,'预算群',through,through)).toBe(0);
+    } finally {store.close();}
+  });
   it('自检只重试指定失败项，不重新调用其他服务', async () => {
     const store=new Store(':memory:');const spy=vi.spyOn(globalThis,'fetch');
     try {const checks=await doctor(store,true,new Set(['配置和人格']));expect(checks.map((check)=>check.name)).toEqual(['配置和人格']);expect(spy).not.toHaveBeenCalled();}

@@ -4,7 +4,7 @@ import { isCommunityScope, type Scope } from '../domain/types.js';
 
 export type SubjectType = 'user' | 'group';
 export interface MemoryEntry { id: string; subject_type: SubjectType; subject_id: string; content: string; source_conversation_id: string; source_start: number | null; source_end: number | null; created_at: string; updated_at: string }
-export interface IdentityAlias { scope: Scope; conversation_id: string; external_id: string; user_id: string; display_name: string | null }
+export interface IdentityAlias { scope: Scope; conversation_id: string; external_id: string; user_id: string; display_name: string | null; remark_name?: string; alias_order?: number }
 export type PlatformMemberRole = 'owner' | 'admin' | 'member';
 export function platformRoleFromRaw(raw: unknown): PlatformMemberRole | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
@@ -85,7 +85,10 @@ export class MemoryRepository {
     return (this.db.prepare('SELECT user_id FROM identity_aliases WHERE scope=? AND conversation_id=? AND external_id=?').get(scope, conversationId, externalId) as { user_id: string } | undefined)?.user_id;
   }
   listIdentities(): IdentityAlias[] {
-    return this.db.prepare('SELECT scope,conversation_id,external_id,user_id,display_name FROM identity_aliases ORDER BY updated_at DESC LIMIT 1000').all() as IdentityAlias[];
+    return this.db.prepare(`SELECT a.scope,a.conversation_id,a.external_id,a.user_id,a.display_name,
+      COALESCE(p.remark_name,'') AS remark_name,a.rowid AS alias_order FROM identity_aliases a
+      LEFT JOIN conversation_member_profiles p ON p.scope=a.scope AND p.conversation_id=a.conversation_id AND p.external_id=a.external_id
+      ORDER BY a.updated_at DESC LIMIT 1000`).all() as IdentityAlias[];
   }
   observePlatformRole(scope: Scope, conversationId: string, externalId: string, raw: unknown, seq: number, timestamp: string): void {
     if (!isCommunityScope(scope)) return;

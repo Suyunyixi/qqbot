@@ -669,7 +669,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     const delivered: DeliveryItem[] = [];
     const harness = new Harness(store, { send: async (item) => { delivered.push(item); return { id: 'qq-1' }; } });
     const before = requests.length;
-    for (let i = 0; i < 85; i++) await harness.receive(event({ id: `silent-${i}`, conversationId: 'group-long', content: `项目讨论 ${i}` }));
+    for (let i = 0; i < 85; i++) await harness.receive(event({ id: `silent-${i}`, conversationId: 'group-long', content: `${'项目讨论 '.repeat(12)}${i}` }));
     expect(requests).toHaveLength(before);
     await harness.receive(event({ id: 'long-trigger', conversationId: 'group-long', isMention: true, content: '回顾一下项目' }));
     await vi.waitFor(() => expect(delivered.length).toBe(1), { timeout: 15000 });

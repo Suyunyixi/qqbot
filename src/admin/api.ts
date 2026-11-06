@@ -71,7 +71,7 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
       json(res,200,{totals,recent});return;
     }
     if (req.method === 'GET' && url.pathname === '/api/conversations') {
-      const rows = store.db.prepare(`SELECT conversation_id,scope,COUNT(*) AS message_count,MAX(timestamp) AS last_activity FROM messages GROUP BY conversation_id,scope ORDER BY MAX(seq) DESC LIMIT 500`).all() as Array<{conversation_id:string;scope:string;message_count:number;last_activity:string}>;
+      const rows = store.db.prepare(`SELECT conversation_id,scope,COUNT(*) AS message_count,MIN(seq) AS first_seq,MAX(timestamp) AS last_activity FROM messages GROUP BY conversation_id,scope ORDER BY MAX(seq) DESC LIMIT 500`).all() as Array<{conversation_id:string;scope:string;message_count:number;first_seq:number;last_activity:string}>;
       const profile=store.db.prepare('SELECT label,note FROM conversation_profiles WHERE scope=? AND conversation_id=?');
       json(res, 200, { conversations: rows.map((row) => { const saved=profile.get(row.scope,row.conversation_id) as {label:string;note:string}|undefined; const settings=['group','guild'].includes(row.scope) ? groupSettings(store,row.conversation_id) : undefined; return {...row,settings,label:settings ? settings.label : saved?.label || '',note:saved?.note || ''}; }) }); return;
     }

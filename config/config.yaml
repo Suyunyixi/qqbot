@@ -7,10 +7,11 @@ model:
   name: deepseek-flash
   timeoutMs: 120000
   vision: true
-  contextTokens: 65536
+  contextTokens: 1048576
 memory:
-  recentMessages: 25
-  summarizeAfter: 80
+  recentMessages: 60
+  summaryBudgetChars: 8000
+  summaryThresholdPercent: 75
 tools:
   search: true
   searchUrl: http://searxng:8080
@@ -29,5 +30,5 @@ delivery:
   chunkCharacters: 1500
   proactive: true
 tasks:
-  concurrency: 2
+  concurrency: 3
   timeoutMs: 1800000

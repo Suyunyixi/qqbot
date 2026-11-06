@@ -21,6 +21,15 @@ export function splitMarkdown(text: string, limit: number): string[] {
     while (line.length + current.length + (current ? 1 : 0) + suffix > limit) {
       const room = Math.max(1, limit - current.length - (current ? 1 : 0) - suffix);
       let cut = room;
+      for(const match of line.matchAll(/<qqbot-at-user\s+id="[A-Za-z0-9_-]+"\s*\/>/g)) {
+        const start=match.index;const end=start+match[0].length;
+        if(start<cut && end>cut) {
+          if(start>0) cut=start;
+          else if(current) {cut=0;}
+          else throw new Error('@ 标记超过单条消息长度限制');
+          break;
+        }
+      }
       if (cut < line.length && /[\uD800-\uDBFF]/.test(line[cut - 1]!)) cut--;
       if (!cut) { flush(); continue; }
       current += (current ? '\n' : '') + line.slice(0, cut);

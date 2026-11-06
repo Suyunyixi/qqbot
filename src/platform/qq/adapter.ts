@@ -7,6 +7,7 @@ import { Harness } from '../../agent/harness.js';
 import { Store } from '../../storage/store.js';
 import type { DeliveryItem, InboundEvent, Sender, SendResult } from '../../domain/types.js';
 import { qqVoiceBuffer } from './voice.js';
+import { qqMentionMarkup } from './mentions.js';
 import { QQGroupProfiles } from './group-profiles.js';
 import { buildNativeArk } from '../../domain/card.js';
 import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs/protocol';
@@ -142,22 +143,24 @@ export class QQAdapter implements Sender {
         return await response.json() as SendResult;
       }
       let payload:Record<string,unknown>;
-      if(item.kind==='text')payload={markdown:{content:item.content}};
+      if(item.kind==='text')payload={markdown:{content:item.scope==='guild'?qqMentionMarkup(item.content):item.content}};
       else if(item.kind==='card')payload={ark:buildNativeArk(JSON.parse(item.content))};
       else if(item.kind==='embed')payload={embed:JSON.parse(item.content)};
-      else if(item.kind==='keyboard') {const input=JSON.parse(item.content) as {text:string;buttons:Array<{label:string;data:string}>};payload={markdown:{content:input.text},keyboard:makeKeyboard(input)};}
+      else if(item.kind==='keyboard') {const input=JSON.parse(item.content) as {text:string;buttons:Array<{label:string;data:string}>};payload={markdown:{content:item.scope==='guild'?qqMentionMarkup(input.text):input.text},keyboard:makeKeyboard(input)};}
       else throw new Error('QQ 频道接口不提供此类本地文件上传，请改用图片或公开链接');
       return item.scope==='guild'?this.bot.messageApi.sendChannelMessageRaw(item.conversationId,creds,{...common,...payload}):this.bot.messageApi.sendDmMessageRaw(item.conversationId,creds,{...common,...payload});
     }
     const target = { scope: item.scope, targetId: item.conversationId, msgId: eventId ? undefined : candidate?.id };
-    // QQ does not render Markdown sent as msg_type=0. Match dsh-qqbot and
-    // explicitly send msg_type=2 with markdown.content for both chat scopes.
-    if (item.kind === 'text') return eventId ? this.bot.send({target,msgType:2,markdown:{content:item.content},extra:eventExtra}) : this.bot.sendMarkdown(target, item.content);
+    // 群聊和私聊均通过官方 Markdown 消息发送，群聊兼容旧版 @ 标记。
+    if (item.kind === 'text') {
+      const content=item.scope==='group'?qqMentionMarkup(item.content):item.content;
+      return eventId ? this.bot.send({target,msgType:2,markdown:{content},extra:eventExtra}) : this.bot.sendMarkdown(target,content);
+    }
     if (item.kind === 'card') return this.bot.send({ target, msgType: 3, content: ' ', ark: buildNativeArk(JSON.parse(item.content)), ...(eventId?{extra:eventExtra}:{}) });
     if (item.kind === 'keyboard') {
       const payload=JSON.parse(item.content) as {text:string;buttons:Array<{label:string;data:string}>};
       const keyboard=makeKeyboard(payload);
-      return this.bot.send({target,msgType:2,markdown:{content:payload.text},keyboard,...(eventId?{extra:eventExtra}:{})});
+      return this.bot.send({target,msgType:2,markdown:{content:item.scope==='group'?qqMentionMarkup(payload.text):payload.text},keyboard,...(eventId?{extra:eventExtra}:{})});
     }
     if(item.kind==='embed')throw new Error('QQ Embed 仅支持频道和频道私信');
     const source = { localPath: item.content };

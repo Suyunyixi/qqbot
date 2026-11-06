@@ -11,6 +11,7 @@ const { ReplyRuntime } = await import('../src/delivery/reply.js');
 const { QQAdapter } = await import('../src/platform/qq/adapter.js');
 const { Harness } = await import('../src/agent/harness.js');
 const { splitMarkdown } = await import('../src/delivery/markdown.js');
+const { qqMentionMarkup } = await import('../src/platform/qq/mentions.js');
 initConfig();
 
 describe('QQ 原生卡片', () => {
@@ -83,6 +84,15 @@ describe('QQ 原生卡片', () => {
     expect(plain).not.toHaveBeenCalled();
     store.close();
   });
+  it('群回复将旧 @ 转成官方标签，并以原生 Markdown 请求发送', async () => {
+    const store=new Store(':memory:');const adapter=new QQAdapter({appId:'app',appSecret:'secret'},store,()=>{});adapter.connected=true;
+    store.record({id:'input-at',conversationId:'g',scope:'group',senderId:'sender',content:'说说',timestamp:new Date().toISOString(),isMention:true,attachments:[]});
+    const raw=vi.spyOn(adapter.bot.messageApi,'sendRaw').mockResolvedValue({id:'sent',timestamp:new Date().toISOString()});
+    await new ReplyRuntime(store,adapter).send('g','group','input-at','text','<@member-1> **你好**');
+    expect(raw).toHaveBeenCalledWith('group','g',expect.any(Object),expect.objectContaining({msg_id:'input-at',msg_type:2,markdown:{content:'<qqbot-at-user id="member-1" /> **你好**'}}));
+    expect(qqMentionMarkup('`<@example>` 和 <@!member-1>')).toBe('`<@example>` 和 <qqbot-at-user id="member-1" />');
+    store.close();
+  });
   it('长 Markdown 的代码块跨消息保持闭合和语言标记', () => {
     const text = '说明\n\n```python\n' + Array.from({length:30}, (_, i) => `print(${i})`).join('\n') + '\n```\n\n结束';
     const chunks = splitMarkdown(text, 100);
@@ -92,6 +102,11 @@ describe('QQ 原生卡片', () => {
       expect((chunk.match(/```/g) ?? []).length % 2).toBe(0);
     }
     expect(chunks.join('\n')).toContain('print(29)');
+  });
+  it('长回复切分时不会拆开 QQ @ 标记',()=>{
+    const tag='<qqbot-at-user id="member-123456" />';
+    const parts=splitMarkdown(`${'甲'.repeat(90)}${tag}你好`,100);
+    expect(parts).toEqual(['甲'.repeat(90),`${tag}你好`]);
   });
   it('按官方 23 模板构造多条链接列表', () => {
     const ark = buildNativeArk({ kind: 'list', title: '榜单', items: [{ text: '视频一', url: 'https://www.bilibili.com/video/BV1example' }, { text: '视频二' }] });

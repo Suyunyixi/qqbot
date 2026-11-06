@@ -31,7 +31,6 @@ const { savedCredentials, QQAdapter } = await import('../src/platform/qq/adapter
 const { makeModel } = await import('../src/models/factory.js');
 const { filesystemRules } = await import('../src/tools/sandbox.js');
 const { liveContext, recheckBeforeReply } = await import('../src/agent/live-context.js');
-const { requestedRecipient, mentionRecipient } = await import('../src/agent/addressing.js');
 import type { DeliveryItem, InboundEvent } from '../src/domain/types.js';
 
 function event(overrides: Partial<InboundEvent> = {}): InboundEvent {
@@ -95,16 +94,21 @@ describe('消息记录与触发', () => {
     expect(result).toContain('有两处要调整');
     store.close();
   });
-  it('请求询问已知群友时生成真实 @，对方已答复或身份有歧义时不重复 @', () => {
+  it('查找群成员时返回真实身份与备注，同名成员不合并', async () => {
     const store = new Store(':memory:');
-    store.record(event({ id: 'ez', senderId: 'platform-openid', senderName: 'EZ' }));
-    const aliases = store.memory.listIdentities();
-    const target = requestedRecipient('问下ez这个还对不对', 'user-a', aliases);
-    expect(mentionRecipient('EZ 你瞅一眼，这里对吗？', target, false)).toBe('<@platform-openid> EZ 你瞅一眼，这里对吗？');
-    expect(mentionRecipient('EZ 已经回答了。', target, true)).toBe('EZ 已经回答了。');
-    store.record(event({ id: 'ez2', senderId: 'another-openid', senderName: 'EZ' }));
-    expect(requestedRecipient('问下ez这个还对不对', 'user-a', store.memory.listIdentities())).toBeUndefined();
-    store.close();
+    const reply=new ReplyRuntime(store,{send:async()=>({})});const tasks=new TaskManager(store,async()=>'',async()=>{});
+    try {
+      store.record(event({id:'one',senderId:'member-1',senderName:'兰林'}));
+      store.memory.saveConversationMember('group','group-a','member-1','苍蓝','');
+      store.record(event({id:'two',senderId:'member-2',senderName:'苍蓝'}));
+      store.record(event({id:'renamed',senderId:'member-2',senderName:'新名字'}));
+      store.record(event({id:'other',conversationId:'other-group',senderId:'member-3',senderName:'苍蓝'}));
+      const lookup=makeTools({conversationId:'group-a',scope:'group',store,reply,tasks,background:false}).find((item)=>item.name==='find_chat_member')!;
+      const result=JSON.parse(String(await lookup.invoke({query:'苍蓝'})));
+      expect(result.result.members).toEqual(expect.arrayContaining([expect.objectContaining({memberId:'member-1',remark:'苍蓝'}),expect.objectContaining({memberId:'member-2',name:'新名字',matchingHistoricalNames:['苍蓝']})]));
+      expect(result.result.members).toHaveLength(2);
+      expect(result.result.hint).toContain('<qqbot-at-user');
+    } finally {tasks.stop();store.close();}
   });
   it('QQ 绑定凭据保存在数据库中，重新打开后无需重新扫码', () => {
     const dbFile = path.join(root, 'qq-binding-test.sqlite');
@@ -532,7 +536,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     harness.balanceAlert.notified();
     await harness.receive(event({id:'owner-balance-fail',conversationId:'group-owner-balance',senderId:'owner',content:'模型余额错误测试',isMention:true}));
     await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
-    expect(delivered[0]?.content).toBe('<@owner> 主人，我的饭饭吃光啦，呜呜……');
+    expect(delivered[0]?.content).toBe('<qqbot-at-user id="owner" /> 主人，我的饭饭吃光啦，呜呜……');
     harness.stop();store.close();
   },20000);
   it('前台工具循环在递归上限之前停止并说明情况', async () => {

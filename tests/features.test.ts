@@ -147,7 +147,7 @@ describe('全局用户记忆和创建者权限', () => {
     const alert=new BalanceAlert(store,reply);const balance=new Error('402 Insufficient Balance');
     expect(isBalanceError(balance)).toBe(true);expect(isBalanceError(new Error('402 unrelated billing issue'))).toBe(false);expect(isBalanceError(new Error('500 error'))).toBe(false);
     await alert.report(new Error('500 error'));expect(sent).toHaveLength(0);
-    await Promise.all([alert.report(balance),alert.report(balance)]);expect(sent).toHaveLength(1);expect(sent[0]).toMatchObject({scope:'group',content:'<@owner> 主人，我的饭饭吃光啦，呜呜……'});
+    await Promise.all([alert.report(balance),alert.report(balance)]);expect(sent).toHaveLength(1);expect(sent[0]).toMatchObject({scope:'group',content:'<qqbot-at-user id="owner" /> 主人，我的饭饭吃光啦，呜呜……'});
     await new BalanceAlert(store,reply).report(balance);expect(sent).toHaveLength(1);
     alert.recovered();await alert.report(balance);expect(sent).toHaveLength(2);store.close();
   });

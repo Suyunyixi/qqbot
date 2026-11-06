@@ -45,7 +45,7 @@ export class BalanceAlert {
     if (!target) {console.warn('余额不足提醒未发送：没有绑定创建者的私聊或群身份');return;}
     state={id:state?.id ?? randomUUID(),status:'pending',lastAttempt:Date.now()};this.write(state);this.sending=true;
     try {
-      const text=target.scope==='group' ? `<@${target.external_id}> ${balanceAlertText}` : balanceAlertText;
+      const text=target.scope==='group' ? `<qqbot-at-user id="${target.external_id}" /> ${balanceAlertText}` : balanceAlertText;
       await this.reply.send(target.conversation_id,target.scope,undefined,'text',text,undefined,`balance:${state.id}`);
       this.write({...state,status:'sent'});
     } catch (error) {

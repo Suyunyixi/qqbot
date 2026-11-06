@@ -58,7 +58,7 @@ export class Harness {
       console.error('聊天回合失败：', message);
       const ownerBalance=owner && isBalanceError(err);
       if (!ownerBalance) void this.balanceAlert.report(err);
-      const response=ownerBalance ? `${isCommunityScope(event.scope) ? `<@${event.senderId}> ` : ''}${balanceAlertText}` : replyForChatError(err);
+      const response=ownerBalance ? `${isCommunityScope(event.scope) ? `<qqbot-at-user id="${event.senderId}" /> ` : ''}${balanceAlertText}` : replyForChatError(err);
       try {
         await this.reply.send(event.conversationId, event.scope, event.id, 'text', response);
         if (ownerBalance) this.balanceAlert.notified();

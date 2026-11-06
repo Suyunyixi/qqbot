@@ -516,7 +516,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     const modelMessages=mainRequest?.messages as Array<{role:string;content:unknown}>;
     const system=JSON.stringify(modelMessages.filter((message)=>message.role==='system'));
     const user=JSON.stringify(modelMessages.filter((message)=>message.role==='user'));
-    expect(system).toContain('持续生效的核心人格');expect(system).toContain('自行判断是否需要 @ 某人');expect(system).toContain('是否使用由你根据表达需要决定');
+    expect(system).toContain('持续生效的核心人格');expect(system).toContain('自行判断是否需要 @ 某人');expect(system).toContain('尽量用合适的格式突出重点');expect(system).toContain('由你根据表达需要决定');
     expect(system).not.toContain('负责存储设备');expect(user).toContain('负责存储设备');
     harness.stop(); store.close();
   }, 20000);

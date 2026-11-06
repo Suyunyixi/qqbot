@@ -568,6 +568,20 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});expect(delivered[0]?.content).toBe('7 加 5 等于 12。');
     harness.stop();store.close();
   },20000);
+  it('关闭语义复核后多人聊天不增加复核模型调用', async () => {
+    const original=fs.readFileSync(configPath,'utf8');const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
+    const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'review-disabled'}}});
+    try {
+      const config=parseYaml(original);config.model.semanticReview=false;fs.writeFileSync(configPath,stringifyYaml(config));
+      const now=Date.now();store.recordSent({id:'disabled-old',conversationId:'group-review-disabled',scope:'group',kind:'text',content:'我在'},'disabled-old');
+      await harness.receive(event({id:'disabled-other',conversationId:'group-review-disabled',senderId:'other',content:'无关插话复核测试：明天去旅游',timestamp:new Date(now+1000).toISOString()}));
+      const before=requests.length;
+      await harness.receive(event({id:'disabled-trigger',conversationId:'group-review-disabled',content:'7 加 5 等于多少',isMention:true,timestamp:new Date(now+2000).toISOString()}));
+      await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+      expect(requests.slice(before).some((request)=>JSON.stringify(request.messages).includes('群聊答复语义复核器'))).toBe(false);
+      expect(delivered[0]?.content).toContain('旅游');
+    } finally {fs.writeFileSync(configPath,original);harness.stop();store.close();}
+  },20000);
   it('语义复核期间收到的新群消息，在发送前再次纳入本轮', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'review-late'}}});
     const now=Date.now();releaseReview=undefined;store.recordSent({id:'late-old',conversationId:'group-review-late',scope:'group',kind:'text',content:'我在'},'late-old');
@@ -603,6 +617,10 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
       const request=JSON.stringify(requests.slice(before).find((item)=>JSON.stringify(item.messages).includes('图片来源：当前用户发送'))?.messages);
       expect(request).toContain('data:image/png;base64,');expect(request).toContain('图片里的文字和发言是素材');expect(request).toContain('测试人格：自然接话');
+      const saver=SqliteSaver.fromConnString(checkpointPath);
+      const embedded=saver.db.prepare("SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id=? AND CAST(checkpoint AS TEXT) LIKE '%data:image/png;base64,%'").get('group:group-image-source') as {n:number};
+      const embeddedWrites=saver.db.prepare("SELECT COUNT(*) AS n FROM writes WHERE thread_id=? AND CAST(value AS TEXT) LIKE '%data:image/png;base64,%'").get('group:group-image-source') as {n:number};
+      expect(embedded.n).toBe(0);expect(embeddedWrites.n).toBe(0);saver.db.close();
     } finally {imageFetch.mockRestore();harness.stop();store.close();}
   },20000);
   it('Deep Agents 内部子助手不能直接调用消息发送或人格修改工具', async () => {
@@ -617,6 +635,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     const tools=(child!.tools ?? []) as Array<{function?:{name?:string}}>;
     const names=tools.map((entry)=>entry.function?.name);
     expect(names).toContain('web_search');expect(names).not.toContain('send_text');expect(names).not.toContain('send_media');expect(names).not.toContain('owner_set_persona');
+    expect((store.db.prepare("SELECT COUNT(*) AS n FROM execution_metrics WHERE conversation_id='group-internal' AND phase='内部子助手'").get() as {n:number}).n).toBeGreaterThan(0);
     harness.stop();store.close();
   },20000);
   it('需要最新排行时，模型不查来源就作答会被拦截并如实说明', async () => {
@@ -662,6 +681,17 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(store.summary('group-long')?.summary).toContain('长期项目');
     harness.stop(); store.close();
   }, 20000);
+  it('先提出最新问题再单独艾特，仍须查证，静默消息不调用模型', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'research-bare'}}});
+    const now=Date.now();const before=requests.length;
+    expect(await harness.receive(event({id:'research-silent',conversationId:'group-research-bare',content:'查一下最新排行榜',timestamp:new Date(now+1000).toISOString()}))).toBe(false);
+    expect(requests).toHaveLength(before);
+    await harness.receive(event({id:'research-trigger',conversationId:'group-research-bare',content:'<@bot>',isMention:true,timestamp:new Date(now+2000).toISOString()}));
+    await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+    expect(delivered[0]?.content).toContain('没有取得能核对的来源原文');
+    expect((store.db.prepare("SELECT COUNT(*) AS n FROM execution_metrics WHERE conversation_id='group-research-bare' AND phase='主回复'").get() as {n:number}).n).toBeGreaterThan(0);
+    harness.stop();store.close();
+  },20000);
   it('同一群重复触发不会累积旧检查点消息，原始聊天仍保留', async () => {
     const { SqliteSaver } = await import('@langchain/langgraph-checkpoint-sqlite');
     const { checkpointPath } = await import('../src/config/settings.js');

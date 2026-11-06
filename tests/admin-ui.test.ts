@@ -47,6 +47,7 @@ describe('管理页面群聊交互', () => {
       else if(input==='/status')data={phase:'ready',qqConnected:true,checks:[]};
       else if(input==='/api/tasks')data={tasks:[]};
       else if(input==='/api/deliveries')data={deliveries:[]};
+      else if(input==='/api/metrics')data={totals:[],recent:[]};
       else if(input==='/api/tools')data={tools:['web_search'],requirements:{web_search:['network']}};
       else if(input==='/api/runtime-config')data={tools:{search:true},permissions:{network:true}};
       else if(input.startsWith('/api/messages?'))data={messages:[]};
@@ -81,6 +82,7 @@ describe('管理页面群聊交互', () => {
       else if(input==='/status')data={phase:'ready',qqConnected:true,checks:[]};
       else if(input==='/api/tasks')data={tasks:[]};
       else if(input==='/api/deliveries')data={deliveries:[]};
+      else if(input==='/api/metrics')data={totals:[],recent:[]};
       else if(input.startsWith('/api/conversation-members?'))data={members:[]};
       else if(input==='/api/conversation-members' && options?.method==='POST'){member=JSON.parse(options.body!) as Record<string,unknown>;data={ok:true};}
       else if(input==='/api/conversation-profile' && options?.method==='PUT'){profile=JSON.parse(options.body!) as Record<string,unknown>;data={ok:true};}

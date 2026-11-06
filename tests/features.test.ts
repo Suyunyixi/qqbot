@@ -25,9 +25,48 @@ const { internalSubagentTools } = await import('../src/agent/subagent-policy.js'
 const { conversationFocus, formatConversationFocus } = await import('../src/agent/conversation-focus.js');
 const { conversationReview } = await import('../src/agent/conversation-review.js');
 const { BalanceAlert, isBalanceError } = await import('../src/agent/balance-alert.js');
+const { AttachmentArchive } = await import('../src/storage/attachments.js');
+const { doctor } = await import('../src/startup/doctor.js');
 function event(group:string,user:string,id:string): InboundEvent { return { id,conversationId:group,scope:'group',senderId:user,senderName:user,content:'消息',timestamp:new Date().toISOString(),isMention:false,attachments:[] }; }
 
 describe('全局用户记忆和创建者权限', () => {
+  it('自检只重试指定失败项，不重新调用其他服务', async () => {
+    const store=new Store(':memory:');const spy=vi.spyOn(globalThis,'fetch');
+    try {const checks=await doctor(store,true,new Set(['配置和人格']));expect(checks.map((check)=>check.name)).toEqual(['配置和人格']);expect(spy).not.toHaveBeenCalled();}
+    finally {spy.mockRestore();store.close();}
+  });
+  it('静默消息图片异步保存为路径，原文不变且可离线回读', async () => {
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'qq-attachment-'));const store=new Store(':memory:');
+    const original=globalThis.fetch;const spy=vi.spyOn(globalThis,'fetch').mockImplementation((input,init)=>String(input).startsWith('https://example.qq.com/')?Promise.resolve(new Response(Buffer.from('image-bytes'),{headers:{'content-type':'image/png'}})):original(input,init));
+    const archive=new AttachmentArchive(store,dir);
+    try {
+      const msg={...event('g','u','photo'),attachments:[{url:'https://example.qq.com/image',content_type:'image/png'}]};store.record(msg);
+      const raw=store.recent('g',1)[0]!.attachments;archive.enqueue(msg);
+      await vi.waitFor(()=>expect(store.db.prepare('SELECT status FROM message_attachments').get()).toMatchObject({status:'saved'}));
+      expect(store.recent('g',1)[0]!.attachments).toBe(raw);
+      expect(fs.readFileSync(archive.file('g','photo',0)!.path).toString()).toBe('image-bytes');
+      spy.mockRejectedValue(new Error('网络已离线'));
+      expect(await archive.imageDataUrl(msg.attachments[0]!)).toBe(`data:image/png;base64,${Buffer.from('image-bytes').toString('base64')}`);
+    } finally {spy.mockRestore();store.close();}
+  });
+  it('附件失败可重试，管理页按需读取归档内容', async () => {
+    const store=new Store(':memory:');const original=globalThis.fetch;let online=false;
+    const spy=vi.spyOn(globalThis,'fetch').mockImplementation((input,init)=>String(input).startsWith('https://example.qq.com/')?(online?Promise.resolve(new Response(Buffer.from('文档内容'),{headers:{'content-type':'application/pdf'}})):Promise.reject(new Error('连接失败'))):original(input,init));
+    const archive=new AttachmentArchive(store);const msg={...event('file-group','u','file-message'),attachments:[{url:'https://example.qq.com/archive-pdf',content_type:'application/pdf',filename:'test.pdf'}]};store.record(msg);
+    const server=http.createServer((req,res)=>void handleAdmin(req,res,store,undefined));await new Promise<void>((resolve)=>server.listen(0,'127.0.0.1',resolve));
+    try {
+      archive.enqueue(msg);await vi.waitFor(()=>expect(store.db.prepare('SELECT status FROM message_attachments').get()).toMatchObject({status:'failed'}));
+      online=true;archive.retry('file-group','file-message',0);await vi.waitFor(()=>expect(store.db.prepare('SELECT status FROM message_attachments').get()).toMatchObject({status:'saved'}));
+      const port=(server.address() as {port:number}).port;const response=await fetch(`http://127.0.0.1:${port}/api/attachment?conversationId=file-group&messageId=file-message&index=0`);
+      expect(response.status).toBe(200);expect(response.headers.get('content-disposition')).toBe('attachment');expect(await response.text()).toBe('文档内容');
+    } finally {spy.mockRestore();await new Promise<void>((resolve)=>server.close(()=>resolve()));store.close();}
+  });
+  it('当前说话人的用户记忆优先于其他参与者的历史记忆', () => {
+    const store=new Store(':memory:');
+    for(let i=0;i<24;i++) {store.record(event('g',`u${i}`,`m${i}`));const user=store.memory.lookup('group','g',`u${i}`)!;for(let j=0;j<8;j++)store.memory.add('user',user,`用户${i}记忆${j}`,'g');}
+    const current=store.memory.context('group','g',['u23',...Array.from({length:23},(_,i)=>`u${i}`)]);
+    expect(current.some((entry)=>entry.content==='用户23记忆0')).toBe(true);store.close();
+  });
   it('余额不足提醒创建者并去重，其他故障不误报，恢复后可再次提醒', async () => {
     const store=new Store(':memory:');store.record(event('g','owner','1'));store.memory.setOwner(store.memory.lookup('group','g','owner')!);
     const sent:Array<{scope:string;content:string}>=[];const reply=new ReplyRuntime(store,{send:async(item)=>{sent.push(item);return {id:`alert-${sent.length}`}}});
@@ -281,8 +320,8 @@ describe('DSH 同款结构化联网搜索', () => {
   });
   it('只使用原生 web_search_tool_result 来源并保留发布时间', async () => {
     const old={base:process.env.MODEL_BASE_URL,key:process.env.MODEL_API_KEY,provider:process.env.SEARCH_PROVIDER};process.env.MODEL_BASE_URL='https://api.deepseek.com';process.env.MODEL_API_KEY='test-key';process.env.SEARCH_PROVIDER='deepseek';
-    const spy=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(JSON.stringify({content:[{type:'text',text:'不能当作来源'},{type:'web_search_tool_result',content:[{type:'web_search_result',url:'https://example.com/source',title:'来源',page_age:'2026-11-01'}]}]}),{status:200}));
-    try { const result=await searchWeb(['查询']);expect(result.sufficient).toBe(true);expect(result.sources).toHaveLength(1);expect(result.sources[0]).toMatchObject({provider:'deepseek',publishedAt:'2026-11-01'}); }
+    const spy=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(JSON.stringify({usage:{input_tokens:12,output_tokens:7},content:[{type:'text',text:'不能当作来源'},{type:'web_search_tool_result',content:[{type:'web_search_result',url:'https://example.com/source',title:'来源',page_age:'2026-11-01'}]}]}),{status:200}));
+    try { const observe=vi.fn();const result=await searchWeb(['查询'],{observe});expect(result.sufficient).toBe(true);expect(result.sources).toHaveLength(1);expect(result.sources[0]).toMatchObject({provider:'deepseek',publishedAt:'2026-11-01'});expect(observe).toHaveBeenCalledWith(expect.objectContaining({status:'success',usage:{input_tokens:12,output_tokens:7,total_tokens:19}})); }
     finally {spy.mockRestore();if(old.base===undefined)delete process.env.MODEL_BASE_URL;else process.env.MODEL_BASE_URL=old.base;if(old.key===undefined)delete process.env.MODEL_API_KEY;else process.env.MODEL_API_KEY=old.key;if(old.provider===undefined)delete process.env.SEARCH_PROVIDER;else process.env.SEARCH_PROVIDER=old.provider;}
   });
 });

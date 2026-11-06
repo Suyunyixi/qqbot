@@ -1,22 +1,22 @@
 import { isCommunityScope, type InboundEvent } from '../domain/types.js';
 import type { MessageRow } from '../storage/store.js';
+import { attachmentSummary } from '../platform/qq/attachments.js';
 
 export interface ConversationFocus {
-  /** Recent conversation candidates, preserving each speaker and message boundary. */
+  /** 保留说话人和消息边界的近期对话。 */
   rows: MessageRow[];
-  /** Older context; long focused messages stay here so their full text remains available. */
+  /** 较早上下文；较长的近期消息也保留在这里，方便读取原文。 */
   background: MessageRow[];
   mentionOnly: boolean;
 }
 
-/** Highlight a bounded recent conversation without guessing whether someone addressed the bot. */
+/** 提取有限的近期对话，不预先猜测发言是否针对机器人。 */
 export function conversationFocus(recent: MessageRow[], event: InboundEvent, windowSeconds: number): ConversationFocus {
   const mentionOnly = event.isMention && event.content.replace(/<@!?[^>]+>/g, '').trim().length === 0;
   if (!isCommunityScope(event.scope)) return { rows: [], background: recent, mentionOnly };
   const triggerTime=Date.parse(event.timestamp);
   if (!Number.isFinite(triggerTime)) return { rows: [], background: recent, mentionOnly };
-  // A previous bot response is a useful boundary: older conversation remains
-  // available as background, but is not presumed to be an unanswered request.
+  // 上一条机器人回复作为边界；更早消息保留为背景，不默认视为待答请求。
   let lastBot=-1;
   for (let i=recent.length-1;i>=0;i--) if (recent[i]!.direction==='out') { lastBot=i; break; }
   const start=lastBot<0?0:lastBot;
@@ -33,7 +33,7 @@ export function formatConversationFocus(rows: MessageRow[]): string {
   return rows.map((row)=>{
     const speaker=row.direction==='out'?'机器人':`${row.sender_name || '群友'} [${row.sender_id}]`;
     const content=row.content.length>700?`${row.content.slice(0,350)} … [本条节选，完整原文见历史] … ${row.content.slice(-250)}`:row.content;
-    const attachments=row.attachments==='[]'?'':` 附件信息：${row.attachments.slice(0,300)}${row.attachments.length>300?'…':''}`;
+    const attachments=row.attachments==='[]'?'':` 附件信息：${attachmentSummary(row.attachments).slice(0,300)}`;
     return `[${row.timestamp} · 近期互动] ${speaker}：${content}${attachments}`;
   }).join('\n');
 }

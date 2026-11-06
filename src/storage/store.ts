@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { sqlitePath } from '../config/settings.js';
 import type { DeliveryItem, InboundEvent, Scope } from '../domain/types.js';
 import { MemoryRepository } from './memory.js';
+import { workspaceFor } from './workspace.js';
 
 export class Store {
   readonly db: Database.Database;
@@ -16,8 +17,7 @@ export class Store {
       catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== 'EPERM' && code !== 'EACCES' && code !== 'ENOTSUP') throw error;
-        // Windows/SMB bind mounts may not implement Unix chmod. The host's
-        // access controls still apply; startup checks verify actual writes.
+        // Windows 或 SMB 挂载可能不支持 chmod；仍由宿主机控制权限并在启动时检查写入。
         console.warn('数据库挂载不支持 chmod；请通过宿主机权限保护数据目录。');
       }
     }
@@ -32,6 +32,19 @@ export class Store {
         raw TEXT, is_mention INTEGER NOT NULL DEFAULT 0, UNIQUE(conversation_id, id)
       );
       CREATE INDEX IF NOT EXISTS messages_conversation_seq ON messages(conversation_id, seq);
+      CREATE TABLE IF NOT EXISTS message_attachments (
+        conversation_id TEXT NOT NULL, message_id TEXT NOT NULL, attachment_index INTEGER NOT NULL,
+        source_hash TEXT NOT NULL, media_type TEXT NOT NULL, relative_path TEXT, status TEXT NOT NULL,
+        error TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(conversation_id,message_id,attachment_index)
+      );
+      CREATE INDEX IF NOT EXISTS message_attachments_source ON message_attachments(source_hash,status);
+      CREATE TABLE IF NOT EXISTS execution_metrics (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL, scope TEXT NOT NULL,
+        task_id TEXT, phase TEXT NOT NULL, name TEXT NOT NULL, duration_ms INTEGER NOT NULL,
+        status TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, total_tokens INTEGER,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS execution_metrics_time ON execution_metrics(created_at);
       CREATE TABLE IF NOT EXISTS summaries (
         conversation_id TEXT PRIMARY KEY, summary TEXT NOT NULL, through_seq INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL
@@ -116,8 +129,19 @@ export class Store {
     if (item.kind === 'card') {
       try { const value = JSON.parse(item.content) as { title?: unknown }; if (typeof value.title === 'string') cardTitle = value.title; } catch { /* Do not turn a successful send into a retry. */ }
     }
-    this.db.prepare(`INSERT OR IGNORE INTO messages (id,conversation_id,scope,sender_id,sender_name,content,timestamp,direction,attachments) VALUES (?,?,?,?,?,?,?,'out',?)`)
-      .run(platformId ?? `sent:${item.id}`, item.conversationId, item.scope, 'bot', '机器人', item.kind === 'text' ? item.content : item.kind === 'card' ? `[card] ${cardTitle}` : item.kind === 'keyboard' ? '[keyboard] 交互按钮' : item.kind === 'embed' ? '[embed] 频道卡片' : `[${item.kind}] ${item.fileName ?? path.basename(item.content)}`, new Date().toISOString(), '[]');
+    const fileKind=['image','video','voice','file'].includes(item.kind);
+    const extension=path.extname(item.content).toLowerCase();
+    const mediaType=({'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.webp':'image/webp','.mp4':'video/mp4','.pdf':'application/pdf','.mp3':'audio/mpeg','.wav':'audio/wav'} as Record<string,string>)[extension] ?? 'application/octet-stream';
+    const messageId=platformId ?? `sent:${item.id}`;
+    this.db.transaction(()=>{
+      const attachments=fileKind ? JSON.stringify([{filename:item.fileName ?? path.basename(item.content),content_type:mediaType}]) : '[]';
+      this.db.prepare(`INSERT OR IGNORE INTO messages (id,conversation_id,scope,sender_id,sender_name,content,timestamp,direction,attachments) VALUES (?,?,?,?,?,?,?,'out',?)`)
+        .run(messageId, item.conversationId, item.scope, 'bot', '机器人', item.kind === 'text' ? item.content : item.kind === 'card' ? `[card] ${cardTitle}` : item.kind === 'keyboard' ? '[keyboard] 交互按钮' : item.kind === 'embed' ? '[embed] 频道卡片' : `[${item.kind}] ${item.fileName ?? path.basename(item.content)}`, new Date().toISOString(), attachments);
+      if(fileKind) {
+        const relative=path.relative(workspaceFor(item.conversationId),item.content);
+        if(relative && !relative.startsWith('..') && !path.isAbsolute(relative))this.db.prepare(`INSERT OR IGNORE INTO message_attachments(conversation_id,message_id,attachment_index,source_hash,media_type,relative_path,status,updated_at) VALUES(?,?,0,?,?,?,'saved',?)`).run(item.conversationId,messageId,`out:${item.id}`,mediaType,`workspace:${relative}`,new Date().toISOString());
+      }
+    })();
   }
   recent(conversationId: string, limit: number, through = Number.MAX_SAFE_INTEGER): MessageRow[] {
     return (this.db.prepare('SELECT * FROM messages WHERE conversation_id = ? AND seq <= ? ORDER BY seq DESC LIMIT ?').all(conversationId, through, limit) as MessageRow[]).reverse();

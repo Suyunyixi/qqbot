@@ -8,6 +8,7 @@ import { shouldRespond } from './trigger.js';
 import { isCommunityScope, type InboundEvent, type Sender } from '../domain/types.js';
 import { createHash } from 'node:crypto';
 import { BalanceAlert, balanceAlertText, isBalanceError } from './balance-alert.js';
+import { AttachmentArchive } from '../storage/attachments.js';
 
 export function replyForChatError(error: unknown): string {
   const status=typeof error==='object' && error!==null && 'status' in error ? Number(error.status) : undefined;
@@ -24,12 +25,16 @@ export class Harness {
   readonly reply: ReplyRuntime;
   readonly tasks: TaskManager;
   readonly balanceAlert: BalanceAlert;
+  readonly attachments: AttachmentArchive;
   private readonly agent: AgentRuntime;
   private readonly queues = new Map<string, Promise<void>>();
   constructor(readonly store: Store, private readonly sender: Sender) {
     this.reply = new ReplyRuntime(store, sender);
+    this.attachments=new AttachmentArchive(store);
+    this.attachments.resumePending();
+    this.attachments.backfillExisting();
     this.balanceAlert=new BalanceAlert(store,this.reply);
-    this.agent = new AgentRuntime(store,(error)=>void this.balanceAlert.report(error));
+    this.agent = new AgentRuntime(store,(error)=>void this.balanceAlert.report(error),this.attachments);
     this.tasks = new TaskManager(store, async (task, signal) => {
       try {return await this.agent.runBackground({ conversationId: task.conversation_id, scope: task.scope, replyTo: task.reply_to ?? undefined, store, reply: this.reply, tasks: this.tasks, background: true, taskId: task.id,owner:!!task.actor_id && store.memory.isOwner(task.scope,task.conversation_id,task.actor_id),qqApi:this.sender.qqApi?.bind(this.sender) }, task, signal);}
       catch(error) {void this.balanceAlert.report(error);throw error;}
@@ -38,13 +43,14 @@ export class Harness {
   start(): void { this.store.recoverSending(); this.tasks.start(); }
   async receive(event: InboundEvent): Promise<boolean> {
     if (!this.store.record(event)) return false;
-    // This fast gate is part of the Harness, before the Deep Agent graph. It
-    // protects the zero-model guarantee even when another run holds the thread.
+    this.attachments.enqueue(event);
+    // 在 Agent 图之前快速过滤，确保普通群消息只记录、不调用模型。
     if (isCommunityScope(event.scope) && !groupSettings(this.store, event.conversationId).enabled) return false;
     if (!shouldRespond(event, effectiveTrigger(this.store, event.scope, event.conversationId))) return false;
     const owner = this.store.memory.isOwner(event.scope, event.conversationId, event.senderId);
     void this.schedule(event.conversationId, async () => {
       await this.agent.respond({ conversationId: event.conversationId, scope: event.scope, replyTo: event.id, actorId:event.senderId, store: this.store, reply: this.reply, tasks: this.tasks, background: false, owner, qqApi:this.sender.qqApi?.bind(this.sender) }, event);
+      this.agent.compactFinishedConversation(event.scope,event.conversationId);
       this.balanceAlert.recovered();
       this.agent.scheduleMemory(event.conversationId, this.store.eventSeq(event.conversationId, event.id));
     }).catch(async (err: unknown) => {
@@ -67,7 +73,7 @@ export class Harness {
     const instruction = task.status === 'waiting' ? '子 Agent 等待群友回答，请转述问题并说明可以@你回复；不要把等待中的任务当作完成。' : task.status === 'progress' ? '这是已安排向群友告知的进度，不代表任务已完成；结合上下文，用你的人格简短表达。' : '请根据原请求，使用 send_media 逐项真实发送要求的文件，再用你的人格回复。发送失败须说明实际情况。';
     const event: InboundEvent = { id: task.reply_to ?? '', conversationId: task.conversation_id, scope: task.scope, senderId: 'system', senderName: '后台任务', timestamp: new Date().toISOString(), isMention: false, attachments: [], content: `后台任务通知（这是系统事件，不是群友发言）。任务ID：${task.id}；原任务：${task.instruction}；状态：${task.status}；结果或问题：${task.result ?? ''}；错误：${task.error ?? ''}。${instruction}` };
     const notificationKey = `${task.status}:${createHash('sha256').update(task.result ?? task.error ?? '').digest('hex').slice(0, 16)}`;
-    try {await this.schedule(task.conversation_id, () => this.agent.respond({ conversationId: task.conversation_id, scope: task.scope, replyTo: task.reply_to ?? undefined, store: this.store, reply: this.reply, tasks: this.tasks, background: false, taskId: task.id, notificationKey }, event, true));}
+    try {await this.schedule(task.conversation_id, async () => {await this.agent.respond({ conversationId: task.conversation_id, scope: task.scope, replyTo: task.reply_to ?? undefined, store: this.store, reply: this.reply, tasks: this.tasks, background: false, taskId: task.id, notificationKey }, event, true);this.agent.compactFinishedConversation(task.scope,task.conversation_id);});}
     catch(error) {void this.balanceAlert.report(error);throw error;}
   }
   private schedule(key: string, work: () => Promise<void>): Promise<void> {

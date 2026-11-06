@@ -50,6 +50,14 @@ Python 在独立容器执行。工具只复制当前会话显式指定的脚本�
 
 原始记录与 thread 上下文、摘要和长期记忆分别保存。运行 `docker compose exec -T bot node dist/cli/history.js list` 列出会话，再运行 `docker compose exec -T bot node dist/cli/history.js export 会话ID > history.jsonl` 导出该会话的原文和平台事件。
 
+收到的 QQ 图片、文件和音视频会异步保存到 `BOT_DATA_HOST/attachments/qq`，数据库保存归档状态与相对路径，原始消息不改写。聊天记录页可按需查看已保存的附件，保存失败可重试；历史链接过期或 QQ 未提供可用下载地址时可能无法补存。发送产物仍在 `BOT_WORKSPACE_HOST` 对应会话目录，消息记录关联该路径。单个接收附件大小上限由 `.env` 中 `BOT_ATTACHMENT_MAX_MB` 设置，默认 1024 MB；文件按流保存，模型需要看图时才读取图片。
+
+Agent 检查点中的图片内容单独保存在 `BOT_DATA_HOST/attachments/checkpoints`，检查点只保留引用；两者都应随数据目录一起备份。成功完成的普通会话只保留最近三个根检查点，后台任务检查点不自动清理。旧数据库可在停止机器人并确认没有未完成后台任务后执行 `npx tsx src/cli/compact-checkpoints.ts --apply`，程序会先在 `BOT_DATA_HOST/backups` 创建并校验完整备份，再整理会话检查点并压缩数据库；不要删除或移动仍需要的备份。
+
+运行概览展示主回复、任务回调、后台任务、内部子助手、语义复核、记忆整理、联网搜索和工具的调用次数、耗时及服务商返回的 Token；未返回用量显示未知，不估算费用。启动自检的模型调用暂未计入，部分供应商还可能有独立搜索计费，因此不能作为完整账单；指标不记录提示词或回复。多人语义复核默认开启，可在运行配置关闭以减少调用，关闭后可能更容易遗漏相关发言。
+
+可用虚构群聊运行 `npm run eval:conversation`，需显式提供 `EVAL_MODEL_API_KEY`、`EVAL_MODEL_BASE_URL`、`EVAL_MODEL_NAME`，可选 `EVAL_MODEL_PROVIDER`。评估会真实调用模型并消耗额度，使用临时数据库和模拟发送端，不会读取真实聊天或发送 QQ 消息；输出供人工比较，不自动声称语义通过。
+
 - `config/config.yaml`：触发关键词、模型能力、记忆、工具、权限和任务配置，新回合读取。
 - SQLite：主人格首次从 `config/persona.md` 导入，可在本机管理页面修改，下一回合生效。
 - `plugins/`：可信工具插件；启动时加载，也可在运行配置页自检后热重载，新回合生效。

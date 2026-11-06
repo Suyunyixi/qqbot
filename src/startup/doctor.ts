@@ -21,9 +21,10 @@ import { checkPythonRunner } from '../tools/python.js';
 import { searchWeb } from '../tools/search.js';
 
 export interface Check { name: string; ok: boolean; message: string }
-export async function doctor(store: Store, full = true): Promise<Check[]> {
+export async function doctor(store: Store, full = true, only?: ReadonlySet<string>): Promise<Check[]> {
   const checks: Check[] = [];
   const check = async (name: string, fn: () => Promise<string> | string) => {
+    if (only && !only.has(name)) return;
     try { checks.push({ name, ok: true, message: await fn() }); }
     catch (error) { const value = error instanceof Error ? error.message : String(error); const secret = readConfig().model.apiKey; checks.push({ name, ok: false, message: secret ? value.replaceAll(secret, '[REDACTED]') : value }); }
   };

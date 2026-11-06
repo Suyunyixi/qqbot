@@ -13,7 +13,7 @@ export function platformRoleFromRaw(raw: unknown): PlatformMemberRole | undefine
   return value==='owner' || value==='admin' || value==='member' ? value : undefined;
 }
 
-/** User identities are separate from group facts; aliases can be linked explicitly. */
+/** 用户身份与群记忆分开，不同身份可由用户明确关联。 */
 export class MemoryRepository {
   constructor(private readonly db: Database.Database) {
     db.exec(`
@@ -56,8 +56,7 @@ export class MemoryRepository {
       }
       db.prepare("INSERT INTO app_settings VALUES ('member_platform_roles_migrated_v1','1',?)").run(new Date().toISOString());
     })();
-    // Repair earlier migrations that treated an unresolved person as a group.
-    // The original legacy row is deliberately retained for future review.
+    // 修复旧版把未确认用户归为群记忆的问题，保留原记录供以后核对。
     db.prepare(`DELETE FROM subject_memories WHERE subject_type='group' AND id IN
       (SELECT id FROM memories WHERE subject_id IS NOT NULL AND subject_id <> '')`).run();
     const migrated = db.prepare("SELECT 1 FROM app_settings WHERE key='subject_memories_migrated'").get();
@@ -68,8 +67,7 @@ export class MemoryRepository {
       const msg = db.prepare("SELECT scope FROM messages WHERE conversation_id=? AND direction='in' LIMIT 1").get(row.conversation_id) as { scope: Scope } | undefined;
       if (!msg) continue;
       const person = row.subject_id ? this.lookup(msg.scope, row.conversation_id, row.subject_id) : undefined;
-      // An unresolved user ID must never be silently converted into a group fact.
-      // Keep the original row in the legacy table for later review.
+      // 未确认的用户不能静默转成群记忆，保留旧记录供以后核对。
       if (row.subject_id && !person) continue;
       if (!person && !isCommunityScope(msg.scope)) continue;
       insert.run(row.id, person ? 'user' : 'group', person ?? row.conversation_id, row.content, row.conversation_id, row.source_start, row.source_end, row.created_at, row.created_at);
@@ -78,8 +76,7 @@ export class MemoryRepository {
   }
   observe(scope: Scope, conversationId: string, externalId: string, displayName?: string): string {
     const existing = this.lookup(scope, conversationId, externalId);
-    // Identical QQ identifiers in the same namespace can share an identity;
-    // group and C2C namespaces never merge without an explicit link.
+    // 同一命名空间的相同 QQ 标识可共享身份；群和私聊身份须明确关联。
     const id = existing ?? `user:${createHash('sha256').update(`${scope}\0${externalId}`).digest('hex').slice(0, 32)}`;
     this.db.prepare(`INSERT INTO identity_aliases VALUES (?,?,?,?,?,?) ON CONFLICT(scope,conversation_id,external_id) DO UPDATE SET display_name=COALESCE(excluded.display_name,identity_aliases.display_name),updated_at=excluded.updated_at`).run(scope, conversationId, externalId, id, displayName ?? null, new Date().toISOString());
     return id;
@@ -186,7 +183,7 @@ export class MemoryRepository {
     const people = [...new Set(participants.map((external) => this.lookup(scope, conversationId, external)).filter((x): x is string => !!x))];
     const group = isCommunityScope(scope) ? this.list('group', conversationId).slice(0, 20) : [];
     const users = people.slice(0, 20).flatMap((id) => this.list('user', id).slice(0, 8));
-    return [...group, ...users].slice(0, 60);
+    return [...users, ...group].slice(0, 60);
   }
 }
 export interface ConversationMember extends IdentityAlias { remark_name: string; note: string; message_count: number; first_message: string | null; last_message: string | null; bot_role: 'owner' | 'ordinary'; platform_role: PlatformMemberRole | null; platform_role_at: string | null }

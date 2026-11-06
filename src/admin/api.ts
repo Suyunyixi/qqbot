@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import fs from 'node:fs';
 import { persona } from '../agent/runtime.js';
 import { Store } from '../storage/store.js';
 import type { Harness } from '../agent/harness.js';
@@ -11,11 +12,12 @@ import { makeTools } from '../tools/registry.js';
 import { ReplyRuntime } from '../delivery/reply.js';
 import { TaskManager } from '../agent/task-manager.js';
 import { platformRoleFromRaw } from '../storage/memory.js';
+import { AttachmentArchive } from '../storage/attachments.js';
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value));
 }
-/** Management is local-only, with origin validation for mutations. */
+/** 管理接口只允许本机访问，写入时校验请求来源。 */
 export async function handlePersona(req: IncomingMessage, res: ServerResponse, store: Store): Promise<void> {
   const host = req.headers.host ?? '';
   if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(host)) { json(res, 403, { error: '管理接口仅允许通过本机地址访问' }); return; }
@@ -38,13 +40,36 @@ async function body(req: IncomingMessage): Promise<unknown> {
   return JSON.parse(text || '{}') as unknown;
 }
 const id = z.string().min(1).max(300);
-/** Local management API; mutating calls require a same-origin browser request. */
+/** 本机管理接口；写入请求必须同源。 */
 export async function handleAdmin(req: IncomingMessage, res: ServerResponse, store: Store, harness: Harness | undefined): Promise<void> {
   const host = req.headers.host ?? '';
   if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(host)) { json(res, 403, { error: '管理接口仅允许本机访问' }); return; }
   const url = new URL(req.url ?? '/', 'http://localhost');
   if (req.method !== 'GET' && (req.headers.origin !== `http://${host}` || !req.headers['content-type']?.startsWith('application/json'))) { json(res, 403, { error: '请求来源无效' }); return; }
   try {
+    if (req.method === 'GET' && url.pathname === '/api/attachment') {
+      const conversationId=id.parse(url.searchParams.get('conversationId'));
+      const messageId=id.parse(url.searchParams.get('messageId'));
+      const index=z.coerce.number().int().min(0).max(100).parse(url.searchParams.get('index'));
+      const file=new AttachmentArchive(store).file(conversationId,messageId,index);
+      if(!file) {json(res,404,{error:'附件未保存或文件已丢失'});return;}
+      const inline=['image/png','image/jpeg','image/gif','image/webp'].includes(file.mediaType);
+      res.writeHead(200,{'Content-Type':file.mediaType,'X-Content-Type-Options':'nosniff','Content-Disposition':inline?'inline':'attachment'});
+      const stream=fs.createReadStream(file.path);stream.on('error',()=>res.destroy());stream.pipe(res);return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/attachment/retry') {
+      const input=z.object({conversationId:id,messageId:id,index:z.number().int().min(0).max(100)}).parse(await body(req));
+      if(!harness)throw new Error('机器人尚未启动');
+      harness.attachments.retry(input.conversationId,input.messageId,input.index);json(res,200,{ok:true});return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/metrics') {
+      const totals=store.db.prepare(`SELECT phase,COUNT(*) AS calls,SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failures,
+        SUM(input_tokens) AS input_tokens,SUM(output_tokens) AS output_tokens,SUM(total_tokens) AS total_tokens,
+        COUNT(total_tokens) AS usage_reported,ROUND(AVG(duration_ms)) AS average_ms
+        FROM execution_metrics WHERE created_at>=strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 day') GROUP BY phase ORDER BY calls DESC`).all();
+      const recent=store.db.prepare('SELECT conversation_id,scope,task_id,phase,name,duration_ms,status,input_tokens,output_tokens,total_tokens,created_at FROM execution_metrics ORDER BY seq DESC LIMIT 100').all();
+      json(res,200,{totals,recent});return;
+    }
     if (req.method === 'GET' && url.pathname === '/api/conversations') {
       const rows = store.db.prepare(`SELECT conversation_id,scope,COUNT(*) AS message_count,MAX(timestamp) AS last_activity FROM messages GROUP BY conversation_id,scope ORDER BY MAX(seq) DESC LIMIT 500`).all() as Array<{conversation_id:string;scope:string;message_count:number;last_activity:string}>;
       const profile=store.db.prepare('SELECT label,note FROM conversation_profiles WHERE scope=? AND conversation_id=?');
@@ -57,7 +82,8 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
       const rows = store.db.prepare("SELECT m.seq,m.id,m.scope,m.sender_id,m.sender_name,m.content,m.timestamp,m.direction,m.attachments,m.is_mention,m.raw,a.user_id,p.remark_name FROM messages m LEFT JOIN identity_aliases a ON a.scope=m.scope AND a.conversation_id=m.conversation_id AND a.external_id=m.sender_id LEFT JOIN conversation_member_profiles p ON p.scope=m.scope AND p.conversation_id=m.conversation_id AND p.external_id=m.sender_id WHERE m.conversation_id=? AND m.seq<? AND (instr(m.content,?)>0 OR instr(COALESCE(m.sender_name,''),?)>0 OR instr(COALESCE(p.remark_name,''),?)>0 OR instr(m.sender_id,?)>0) ORDER BY m.seq DESC LIMIT 101").all(conversationId,before,query,query,query,query) as Array<Record<string, unknown>>;
       const hasMore=rows.length>100; const page=rows.slice(0,100);
       const owner = store.memory.owner();
-      json(res, 200, { hasMore, nextBefore:hasMore ? page[page.length-1]?.seq : null, messages: page.reverse().map(({raw, ...row}) => { let eventType: unknown; let platformRole: string|undefined; try { if (typeof raw==='string') { const parsed=JSON.parse(raw) as {rawEventType?:unknown};eventType=parsed.rawEventType;if(row.scope==='group'||row.scope==='guild')platformRole=platformRoleFromRaw(parsed); } } catch { /* older record */ } return { ...row, eventType, platformRole, botRole: row.direction === 'out' ? 'bot' : row.user_id && row.user_id === owner ? 'owner' : 'ordinary' }; }) }); return;
+      const attachmentRows=store.db.prepare('SELECT attachment_index,status,error FROM message_attachments WHERE conversation_id=? AND message_id=? ORDER BY attachment_index');
+      json(res, 200, { hasMore, nextBefore:hasMore ? page[page.length-1]?.seq : null, messages: page.reverse().map(({raw, ...row}) => { let eventType: unknown; let platformRole: string|undefined; try { if (typeof raw==='string') { const parsed=JSON.parse(raw) as {rawEventType?:unknown};eventType=parsed.rawEventType;if(row.scope==='group'||row.scope==='guild')platformRole=platformRoleFromRaw(parsed); } } catch { /* 兼容早期记录。 */ } return { ...row, conversation_id:conversationId, eventType, platformRole, archivedAttachments:attachmentRows.all(conversationId,row.id), botRole: row.direction === 'out' ? 'bot' : row.user_id && row.user_id === owner ? 'owner' : 'ordinary' }; }) }); return;
     }
     if (req.method === 'GET' && url.pathname === '/api/tools') { json(res, 200, { tools: Object.keys(toolPermissions).filter((name) => !name.startsWith('owner_')).sort(), requirements: toolPermissions }); return; }
     if (req.method === 'GET' && url.pathname === '/api/plugins') { json(res,200,{plugins:registeredPlugins().map((item)=>({name:item.name,permissions:item.permissions}))});return; }

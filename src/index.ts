@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import QRCode from 'qrcode';
-import { initConfig, setRuntimeConfigProvider } from './config/settings.js';
+import { createHash } from 'node:crypto';
+import { initConfig, readConfig, setRuntimeConfigProvider } from './config/settings.js';
 import { doctor, type Check } from './startup/doctor.js';
 import { Store } from './storage/store.js';
 import { Harness } from './agent/harness.js';
@@ -22,6 +23,17 @@ let adapter: QQAdapter | undefined;
 let harness: Harness | undefined;
 let startedTasks = false;
 let checksReady = false;
+function configStamp():string {
+  try {return createHash('sha256').update(JSON.stringify(readConfig())).digest('hex');} catch {return '';}
+}
+async function waitRetry(delay:number,stamp:string):Promise<boolean> {
+  const end=Date.now()+delay;
+  while(Date.now()<end) {
+    await new Promise((resolve)=>setTimeout(resolve,Math.min(5000,end-Date.now())));
+    if(configStamp()!==stamp)return true;
+  }
+  return false;
+}
 function refreshConnectionState(): void {
   if (!adapter || !harness) return;
   if (status.qqConnected) for (const check of status.checks) if (!check.ok) void harness.balanceAlert.report(check.message);
@@ -58,21 +70,26 @@ server.listen(port, process.env.BOT_HOST ?? '127.0.0.1', () => console.log(`状�
 
 async function main(): Promise<void> {
   await loadPlugins();
-  // Services can become available after the QR page starts, particularly while
-  // a first model download is in progress. Keep retrying failed checks rather
-  // than requiring a manual restart after dependencies recover.
+  // 依赖暂不可用时只重试失败项目，避免反复请求已通过的模型和搜索服务。
   const checksPromise = (async () => {
+    let previous:Check[]=[];
+    let retries=0;
     for (;;) {
-      const checks = await doctor(store).catch((error: unknown): Check[] => [{ name: '启动检查', ok: false, message: error instanceof Error ? error.message : String(error) }]);
+      const failed=previous.filter((check)=>!check.ok);
+      const stamp=configStamp();
+      const retryNames=previous.length && !failed.some((check)=>check.name==='启动检查') ? new Set(failed.map((check)=>check.name)) : undefined;
+      const current = await doctor(store,true,retryNames).catch((error: unknown): Check[] => [{ name: '启动检查', ok: false, message: error instanceof Error ? error.message : String(error) }]);
+      const checks=retryNames ? [...previous.filter((check)=>check.ok),...current] : current;
+      previous=checks;
       status.checks = checks;
       if (status.qqConnected && harness) {
         for (const check of checks) if (!check.ok) void harness.balanceAlert.report(check.message);
         if (checks.some((check)=>check.name==='模型与工具调用' && check.ok)) harness.balanceAlert.recovered();
       }
-      for (const check of checks) console.log(`[${check.ok ? '通过' : '失败'}] ${check.name}: ${check.message}`);
+      for (const check of current) console.log(`[${check.ok ? '通过' : '失败'}] ${check.name}: ${check.message}`);
       if (checks.every((check) => check.ok)) { status.error = undefined; return; }
       status.error = '启动自检未通过，修复依赖后将自动重试';
-      await new Promise((resolve) => setTimeout(resolve, 30000));
+      if(await waitRetry(Math.min(300000,30000*2**Math.min(retries++,4)),stamp)) {previous=[];retries=0;}
     }
   })();
   void checksPromise.then(() => { checksReady = true; refreshConnectionState(); });

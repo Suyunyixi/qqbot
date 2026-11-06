@@ -24,6 +24,7 @@ services:
       - ${BOT_MODEL_ENV_HOST:-./.env}:/run/config/model.env:ro
     environment:
       BOT_DATA_DIR: /data
+      BOT_ATTACHMENT_MAX_MB: ${BOT_ATTACHMENT_MAX_MB:-1024}
       BOT_SQLITE_PATH: ${BOT_SQLITE_PATH:-/data/bot.sqlite}
       BOT_CHECKPOINT_PATH: ${BOT_CHECKPOINT_PATH:-/data/checkpoints.sqlite}
       BOT_WORKSPACE_DIR: /workspace

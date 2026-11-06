@@ -12,6 +12,7 @@
     "dev": "tsx src/index.ts",
     "doctor": "node dist/cli/doctor.js",
     "doctor:dev": "tsx src/cli/doctor.ts",
+    "eval:conversation": "tsx src/cli/evaluate-conversation.ts",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

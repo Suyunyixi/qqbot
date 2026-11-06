@@ -6,6 +6,7 @@ import { sqlitePath } from '../config/settings.js';
 import type { DeliveryItem, InboundEvent, Scope } from '../domain/types.js';
 import { MemoryRepository } from './memory.js';
 import { workspaceFor } from './workspace.js';
+import { quoteSearchSql } from './quote-search.js';
 
 export class Store {
   readonly db: Database.Database;
@@ -198,7 +199,7 @@ export class Store {
   }
   search(conversationId: string, query: string, limit = 20, before = Number.MAX_SAFE_INTEGER): MessageRow[] {
     const q = query.replace(/[%_\\]/g, '\\$&');
-    return this.db.prepare("SELECT * FROM messages WHERE conversation_id=? AND seq<? AND content LIKE ? ESCAPE '\\' ORDER BY seq DESC LIMIT ?").all(conversationId, before, `%${q}%`, limit) as MessageRow[];
+    return this.db.prepare(`SELECT * FROM messages WHERE conversation_id=? AND seq<? AND (content LIKE ? ESCAPE '\\' OR ${quoteSearchSql('raw','like')}) ORDER BY seq DESC LIMIT ?`).all(conversationId, before, `%${q}%`, `%${q}%`, limit) as MessageRow[];
   }
   summary(conversationId: string): { summary: string; through_seq: number } | undefined {
     return this.db.prepare('SELECT summary,through_seq FROM summaries WHERE conversation_id=?').get(conversationId) as { summary: string; through_seq: number } | undefined;
@@ -250,5 +251,5 @@ export class Store {
   recoverSending(): void { this.db.prepare("UPDATE outbox SET status='unknown',error='发送中断，结果未知，未自动重发' WHERE status='sending'").run(); }
   close(): void { this.db.close(); }
 }
-export interface MessageRow { seq: number; id: string; sender_id: string; sender_name: string | null; content: string; timestamp: string; direction: string; attachments: string }
+export interface MessageRow { seq: number; id: string; sender_id: string; sender_name: string | null; content: string; timestamp: string; direction: string; attachments: string; raw?: string | null }
 export interface TaskRow { id: string; conversation_id: string; scope: Scope; reply_to: string | null; instruction: string; status: string; result: string | null; error: string | null; notified: number; actor_id?:string|null }

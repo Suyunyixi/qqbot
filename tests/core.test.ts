@@ -24,6 +24,7 @@ const { TaskManager } = await import('../src/agent/task-manager.js');
 const { makeTools, workspaceFor } = await import('../src/tools/registry.js');
 const { resolveWorkspaceFile } = await import('../src/storage/workspace.js');
 const { imageAttachments, qqImageDataUrl, voiceTranscripts } = await import('../src/platform/qq/attachments.js');
+const { renderMessages } = await import('../src/agent/message-view.js');
 const { readPublicWebpage } = await import('../src/tools/web.js');
 const { qqVoiceBuffer } = await import('../src/platform/qq/voice.js');
 const { pcmToSilk, loadSilkWasm } = await import('@tencent-connect/qqbot-nodejs/protocol');
@@ -82,6 +83,13 @@ describe('沙箱与动态配置', () => {
 });
 
 describe('消息记录与触发', () => {
+  it('超出输入预算时保留完整消息边界及超长消息的读取标识',()=>{
+    const row=(id:string,content:string)=>({seq:1,id,sender_id:'a',sender_name:'甲',content,timestamp:'2026-11-06T00:00:00Z',direction:'in',attachments:'[]'});
+    const truncated=renderMessages([row('old','早先消息'),row('latest','长'.repeat(1000))],400);
+    expect(truncated).toContain('消息标识:latest');expect(truncated).toContain('可按消息标识读取原文');expect(truncated).not.toContain('早先消息');
+    const whole=renderMessages([row('old','早先消息'),row('new','新消息')],1000);
+    expect(whole).toContain('消息标识:old');expect(whole).toContain('消息标识:new');
+  });
   it('发送前重新检查处理中收到的群友答复，静默消息本身不会唤醒模型', async () => {
     const store = new Store(':memory:');
     store.record(event({ id: 'trigger', isMention: true }));
@@ -196,6 +204,29 @@ describe('消息记录与触发', () => {
       const first=JSON.parse(String(await search.invoke({query:'旧项目'}))) as {result:Array<{sequence:number;content:string}>};
       const next=JSON.parse(String(await search.invoke({query:'旧项目',before:first.result.at(-1)!.sequence}))) as {result:Array<{sequence:number;content:string}>};
       expect(first.result).toHaveLength(20);expect(next.result).toHaveLength(5);expect(next.result.at(-1)?.content).toBe('旧项目记录 0');
+    } finally {tasks.stop();store.close();}
+  });
+  it('历史原文和引用原文均可搜索、翻阅并按消息读取', async () => {
+    const store=new Store(':memory:');const reply=new ReplyRuntime(store,{send:async()=>({})});const tasks=new TaskManager(store,async()=>'',async()=>{});
+    try {
+      store.setSetting('quoted-history','groupSettings',JSON.stringify({disabledTools:['search_chat_history','read_chat_history','read_chat_message']}));
+      const raw={refMsgIdx:'REFIDX-test',msgElements:[{message_type:103,msg_idx:'REFIDX-test',content:'中山大学附属医院'}]};
+      store.record(event({id:'quoted-history',conversationId:'quoted-history',senderName:'群友',content:'你这又是去看啥',raw}));
+      store.record(event({id:'invalid-raw',conversationId:'quoted-history',content:'其他内容'}));
+      store.db.prepare("UPDATE messages SET raw='异常旧数据' WHERE id='invalid-raw'").run();
+      const tools=makeTools({conversationId:'quoted-history',scope:'group',store,reply,tasks,background:false});
+      const search=tools.find((item)=>item.name==='search_chat_history')!;
+      const history=tools.find((item)=>item.name==='read_chat_history')!;
+      const message=tools.find((item)=>item.name==='read_chat_message')!;
+      const found=JSON.parse(String(await search.invoke({query:'附属医院'})));
+      expect(found.result).toHaveLength(1);expect(found.result[0]).toMatchObject({content:'你这又是去看啥',quotedContent:'中山大学附属医院'});
+      const list=JSON.parse(String(await history.invoke({limit:10})));
+      expect(list.result.messages[0]).toMatchObject({content:'你这又是去看啥',quotedContent:'中山大学附属医院'});
+      const single=JSON.parse(String(await message.invoke({messageId:'quoted-history',offset:0})));
+      expect(single.result).toMatchObject({content:'你这又是去看啥',quotedContent:'中山大学附属医院'});
+      const live=liveContext(store,'group','quoted-history',readConfig(),store.eventSeq('quoted-history','invalid-raw'));
+      store.record(event({id:'live-quote',conversationId:'quoted-history',content:'群友补充',raw}));
+      expect(String(live.takePending()?.content)).toContain('该消息引用的原文：中山大学附属医院');
     } finally {tasks.stop();store.close();}
   });
   it('不输入关键词也能顺序翻阅历史并分段读取长消息', async () => {
@@ -384,7 +415,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
             releaseReview=()=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({id:'held-review',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:JSON.stringify({needsRevision:false,reason:''})},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}))};
             return;
           }
-          const issue=allText.includes('语义复核测试标记') || allText.includes('无关插话复核测试');
+          const issue=allText.includes('语义复核测试标记') || allText.includes('无关插话复核测试') || allText.includes('读取后复核测试');
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({id:'review',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:JSON.stringify({needsRevision:issue,reason:issue?(allText.includes('无关插话复核测试')?'把无关群聊带进了答复':'没有向群友提出实际问题'):''})},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
           return;
@@ -415,6 +446,9 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
         }
         let reply: Record<string, unknown>;
         if (allText.includes('工具死循环模拟')) reply={role:'assistant',content:null,tool_calls:[{id:`loop-${requests.length}`,type:'function',function:{name:'sandbox_capabilities',arguments:'{}'}}]};
+        else if (allText.includes('读取后复核测试') && allText.includes('上一条只是尚未发送')) reply={role:'assistant',content:'群友引用的是医院，具体情况不清楚。'};
+        else if (allText.includes('读取后复核测试') && last?.role!=='tool') reply={role:'assistant',content:null,tool_calls:[{id:'review-history',type:'function',function:{name:'read_chat_history',arguments:JSON.stringify({limit:10})}}]};
+        else if (allText.includes('读取后复核测试')) reply={role:'assistant',content:'我来说旧截图。'};
         else if (allText.includes('视觉自主测试')) reply=allText.includes('data:image/png;base64,')?{role:'assistant',content:'已结合图片继续回答'}:{role:'assistant',content:null,tool_calls:[{id:'autonomous-image',type:'function',function:{name:'read_chat_image',arguments:JSON.stringify({messageId:'autonomous-picture',index:0})}}]};
         else if (allText.includes('历史图片回查测试')) {
           const toolMessages=parsed.messages.filter((message)=>message.role==='tool');
@@ -669,6 +703,29 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     const request=JSON.stringify(requests.at(-1)?.messages);
     expect(request).toContain('用户引用的消息');expect(request).toContain('此前关于下载能力的消息');expect(request).toContain('backgroundOnlyTools');expect(request).toContain('download_media');expect(request).toContain('supportedMediaSites');
     harness.stop();store.close();
+  },20000);
+  it('触发消息之前群友引用的原文，连同发言人一起交给模型', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
+    const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'prior-quote-reply'}}});
+    try {
+      const before=requests.length;
+      await harness.receive(event({id:'prior-quote',conversationId:'prior-quote-group',senderId:'other',senderName:'群友',content:'你这又是去看啥',raw:{refMsgIdx:'REFIDX-test',msgElements:[{message_type:103,msg_idx:'REFIDX-test',content:'中山大学附属医院'}]}}));
+      await harness.receive(event({id:'prior-quote-trigger',conversationId:'prior-quote-group',content:'看下他在看啥，具体是啥',isMention:true}));
+      await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+      const main=requests.slice(before).find((request)=>!JSON.stringify(request.messages).includes('群聊答复语义复核器'));
+      const text=JSON.stringify(main?.messages);
+      expect(text).toContain('群友 [other]');expect(text).toContain('你这又是去看啥');expect(text).toContain('该消息引用的原文：中山大学附属医院');
+    } finally {harness.stop();store.close();}
+  },20000);
+  it('读取历史之后，语义复核仍能发现与当前问题无关的旧话题', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
+    const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'read-review'}}});
+    try {
+      await harness.receive(event({id:'other-quote',conversationId:'review-after-read',senderId:'other',senderName:'群友',content:'你说的是啥',raw:{msgElements:[{message_type:103,content:'医院'}]}}));
+      await harness.receive(event({id:'read-review-trigger',conversationId:'review-after-read',content:'读取后复核测试',isMention:true}));
+      await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+      expect(delivered[0]?.content).toContain('群友引用的是医院');
+    } finally {harness.stop();store.close();}
   },20000);
   it('真实 Agent 先发现工具，再动态加载并执行，普通消息不触发', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'dynamic-ok'}}});

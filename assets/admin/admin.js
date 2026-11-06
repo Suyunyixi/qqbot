@@ -62,7 +62,8 @@ function historyMessage(m) {
   const avatar=fromBot?'🐋':Array.from(name)[0]||'友';
   const role=!fromBot && m.botRole==='owner'?'创建者':!fromBot && m.platformRole?platformRoleName(m.platformRole):'';
   const body=m.content?`<div class="chat-text">${h(m.content)}</div>`:'';
-  return `<article class="chat-message ${fromBot?'out':'in'}"><div class="chat-avatar">${h(avatar)}</div><div class="chat-message-main"><div class="chat-meta"><strong>${h(name)}</strong>${role?`<span class="chat-role">${h(role)}</span>`:''}<time>${time(m.timestamp)}</time></div><div class="chat-bubble">${body}${historyAttachments(m)||(!body?'<div class="muted">[空消息]</div>':'')}</div></div></article>`;
+  const quote=m.quotedContent?`<div class="chat-quote"><span>引用</span>${h(m.quotedContent)}</div>`:'';
+  return `<article class="chat-message ${fromBot?'out':'in'}"><div class="chat-avatar">${h(avatar)}</div><div class="chat-message-main"><div class="chat-meta"><strong>${h(name)}</strong>${role?`<span class="chat-role">${h(role)}</span>`:''}<time>${time(m.timestamp)}</time></div><div class="chat-bubble">${quote}${body}${historyAttachments(m)||(!body&&!quote?'<div class="muted">[空消息]</div>':'')}</div></div></article>`;
 }
 function identityNumber(userId) {
   const first=new Map();

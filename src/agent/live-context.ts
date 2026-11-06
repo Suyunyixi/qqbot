@@ -3,7 +3,7 @@ import { createMiddleware } from 'langchain';
 import { isCommunityScope, type Scope } from '../domain/types.js';
 import type { Store, MessageRow } from '../storage/store.js';
 import type { AppConfig } from '../config/settings.js';
-import { attachmentSummary } from '../platform/qq/attachments.js';
+import { renderMessages } from './message-view.js';
 
 /** 在最后一次中间件检查之后，再检查新到消息。 */
 export async function recheckBeforeReply<T>(initial: T, takePending: () => HumanMessage | undefined, resume: (message: HumanMessage) => Promise<T>): Promise<T> {
@@ -29,7 +29,7 @@ export function liveContext(store: Store, scope: Scope, conversationId: string, 
     const rows = pending(); if (!rows.length) return undefined;
     cursor = rows[rows.length - 1]!.seq;
     const additions = silent(rows); if (!additions.length) return undefined;
-    const text = additions.map((row) => `[${row.timestamp}] ${row.sender_name ?? '群友'} [${row.sender_id}]：${row.content}${row.attachments !== '[]' ? ` 附件：${attachmentSummary(row.attachments)}` : ''}`).join('\n').slice(-10000);
+    const text = renderMessages(additions,Math.floor(config.model.contextTokens / 8));
     return new HumanMessage(`在处理当前请求期间，群友补充了以下对话。这些是群聊数据，请结合相关发言、区分说话人，不必机械地逐条回复：\n${text}`);
   };
   const middleware = createMiddleware({

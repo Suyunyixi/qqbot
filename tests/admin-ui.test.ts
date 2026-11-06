@@ -144,7 +144,7 @@ describe('管理页面群聊交互', () => {
       else if(input==='/api/tasks')data={tasks:[]};
       else if(input==='/api/deliveries')data={deliveries:[]};
       else if(input==='/api/metrics')data={totals:[],recent:[]};
-      else if(input.startsWith('/api/messages?'))data=input.includes('before=')?{messages:[{id:'old',conversation_id:'group-id',direction:'in',sender_name:'群友',content:'更早的消息',attachments:'[]'}],hasMore:false,nextBefore:null}:{messages:[{id:'latest',conversation_id:'group-id',direction:'out',content:'<最新消息>',attachments:'[]'}],hasMore:true,nextBefore:12};
+      else if(input.startsWith('/api/messages?'))data=input.includes('before=')?{messages:[{id:'old',conversation_id:'group-id',direction:'in',sender_name:'群友',content:'更早的消息',attachments:'[]'}],hasMore:false,nextBefore:null}:{messages:[{id:'latest',conversation_id:'group-id',direction:'out',content:'<最新消息>',quotedContent:'<引用原文>',attachments:'[]'}],hasMore:true,nextBefore:12};
       else throw Error(`unexpected ${input}`);
       return {ok:true,json:async()=>data};
     });
@@ -153,6 +153,7 @@ describe('管理页面群聊交互', () => {
     await vi.waitFor(()=>expect(view.innerHTML).toContain('启动自检'));
     await vm.runInContext("page('history')",context);
     expect(view.innerHTML).toContain('我的群');expect(view.innerHTML).toContain('chat-message out');expect(view.innerHTML).toContain('&lt;最新消息&gt;');
+    expect(view.innerHTML).toContain('chat-quote');expect(view.innerHTML).toContain('&lt;引用原文&gt;');
     await element('#history-older').onclick!();
     expect(urls.some((url)=>url.includes('before=12'))).toBe(true);
     expect(element('#history-messages').html).toContain('更早的消息');expect(element('#history-older').hidden).toBe(true);

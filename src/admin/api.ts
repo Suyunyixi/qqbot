@@ -13,6 +13,8 @@ import { TaskManager } from '../agent/task-manager.js';
 import { platformRoleFromRaw } from '../storage/memory.js';
 import { AttachmentArchive } from '../storage/attachments.js';
 import { builtInCatalog, describeTool, toolFeature } from '../tools/catalog.js';
+import { quotedMessage } from '../agent/quoted-message.js';
+import { quoteSearchSql } from '../storage/quote-search.js';
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value));
@@ -80,11 +82,11 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
       const conversationId = id.parse(url.searchParams.get('conversationId'));
       const before = z.coerce.number().int().positive().parse(url.searchParams.get('before') ?? Number.MAX_SAFE_INTEGER);
       const query = z.string().max(200).parse(url.searchParams.get('q') ?? '');
-      const rows = store.db.prepare("SELECT m.seq,m.id,m.scope,m.sender_id,m.sender_name,m.content,m.timestamp,m.direction,m.attachments,m.is_mention,m.raw,a.user_id,p.remark_name FROM messages m LEFT JOIN identity_aliases a ON a.scope=m.scope AND a.conversation_id=m.conversation_id AND a.external_id=m.sender_id LEFT JOIN conversation_member_profiles p ON p.scope=m.scope AND p.conversation_id=m.conversation_id AND p.external_id=m.sender_id WHERE m.conversation_id=? AND m.seq<? AND (instr(m.content,?)>0 OR instr(COALESCE(m.sender_name,''),?)>0 OR instr(COALESCE(p.remark_name,''),?)>0 OR instr(m.sender_id,?)>0) ORDER BY m.seq DESC LIMIT 101").all(conversationId,before,query,query,query,query) as Array<Record<string, unknown>>;
+      const rows = store.db.prepare(`SELECT m.seq,m.id,m.scope,m.sender_id,m.sender_name,m.content,m.timestamp,m.direction,m.attachments,m.is_mention,m.raw,a.user_id,p.remark_name FROM messages m LEFT JOIN identity_aliases a ON a.scope=m.scope AND a.conversation_id=m.conversation_id AND a.external_id=m.sender_id LEFT JOIN conversation_member_profiles p ON p.scope=m.scope AND p.conversation_id=m.conversation_id AND p.external_id=m.sender_id WHERE m.conversation_id=? AND m.seq<? AND (instr(m.content,?)>0 OR instr(COALESCE(m.sender_name,''),?)>0 OR instr(COALESCE(p.remark_name,''),?)>0 OR instr(m.sender_id,?)>0 OR ${quoteSearchSql('m.raw','contains')}) ORDER BY m.seq DESC LIMIT 101`).all(conversationId,before,query,query,query,query,query) as Array<Record<string, unknown>>;
       const hasMore=rows.length>100; const page=rows.slice(0,100);
       const owner = store.memory.owner();
       const attachmentRows=store.db.prepare('SELECT attachment_index,status,error FROM message_attachments WHERE conversation_id=? AND message_id=? ORDER BY attachment_index');
-      json(res, 200, { hasMore, nextBefore:hasMore ? page[page.length-1]?.seq : null, messages: page.reverse().map(({raw, ...row}) => { let eventType: unknown; let platformRole: string|undefined; try { if (typeof raw==='string') { const parsed=JSON.parse(raw) as {rawEventType?:unknown};eventType=parsed.rawEventType;if(row.scope==='group'||row.scope==='guild')platformRole=platformRoleFromRaw(parsed); } } catch { /* 兼容早期记录。 */ } return { ...row, conversation_id:conversationId, eventType, platformRole, archivedAttachments:attachmentRows.all(conversationId,row.id), botRole: row.direction === 'out' ? 'bot' : row.user_id && row.user_id === owner ? 'owner' : 'ordinary' }; }) }); return;
+      json(res, 200, { hasMore, nextBefore:hasMore ? page[page.length-1]?.seq : null, messages: page.reverse().map(({raw, ...row}) => { let eventType: unknown; let platformRole: string|undefined; try { if (typeof raw==='string') { const parsed=JSON.parse(raw) as {rawEventType?:unknown};eventType=parsed.rawEventType;if(row.scope==='group'||row.scope==='guild')platformRole=platformRoleFromRaw(parsed); } } catch { /* 兼容早期记录。 */ } return { ...row, quotedContent:quotedMessage(raw), conversation_id:conversationId, eventType, platformRole, archivedAttachments:attachmentRows.all(conversationId,row.id), botRole: row.direction === 'out' ? 'bot' : row.user_id && row.user_id === owner ? 'owner' : 'ordinary' }; }) }); return;
     }
     if (req.method === 'GET' && url.pathname === '/api/tools') {
       const config=readConfig();const entries=builtInCatalog().filter((entry)=>!entry.name.startsWith('owner_'));
@@ -95,7 +97,7 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
       }} catch(error){pluginError=error instanceof Error?error.message:String(error);} finally {tasks.stop();probe.close();}
       const catalog=entries.map((entry)=>{const feature=toolFeature[entry.name];const missing=entry.permissions.filter((permission)=>!config.sandbox.permissions[permission]);const localImage=['list_chat_images','read_chat_image'].includes(entry.name);const status=localImage?(entry.name==='read_chat_image' && !config.model.vision?'当前模型未启用图片理解':'可查询当前会话记录，无需额外授权'):feature && !config.tools[feature]?'全局已关闭':missing.length?'缺少沙箱权限':'已启用，实际可用性取决于依赖和平台权限';return {...entry,status,missing};});
       const requirements=Object.fromEntries(catalog.map((entry)=>[entry.name,entry.permissions]));
-      json(res,200,{tools:catalog.filter((entry)=>!['find_tools','list_chat_images','read_chat_image'].includes(entry.name)).map((entry)=>entry.name),requirements,catalog,pluginError});return;
+      json(res,200,{tools:catalog.filter((entry)=>!['find_tools','list_chat_images','read_chat_image','search_chat_history','read_chat_history','read_chat_message'].includes(entry.name)).map((entry)=>entry.name),requirements,catalog,pluginError});return;
     }
     if (req.method === 'GET' && url.pathname === '/api/tool-activity') {
       const discoveries=store.db.prepare('SELECT conversation_id,scope,task_id,query,candidates,created_at,kind FROM tool_discoveries ORDER BY seq DESC LIMIT 100').all();

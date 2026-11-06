@@ -301,6 +301,17 @@ describe('全局用户记忆和创建者权限', () => {
 });
 
 describe('管理页面接口', () => {
+  it('聊天记录页面能按引用原文搜索并查看引用', async () => {
+    const store=new Store(':memory:');
+    store.record({...event('group','member','quoted'),content:'你说的是哪个',raw:{refMsgIdx:'r',msgElements:[{message_type:103,msg_idx:'r',content:'中山大学附属医院'}]}});
+    const server=http.createServer((req,res)=>void handleAdmin(req,res,store,undefined));await new Promise<void>((resolve)=>server.listen(0,'127.0.0.1',resolve));
+    const address=server.address();if(!address||typeof address==='string')throw Error('listen');
+    try {
+      const response=await fetch(`http://127.0.0.1:${address.port}/api/messages?conversationId=group&q=${encodeURIComponent('附属医院')}`);
+      const result=await response.json() as {messages:Array<{content:string;quotedContent:string}>};
+      expect(result.messages).toHaveLength(1);expect(result.messages[0]).toMatchObject({content:'你说的是哪个',quotedContent:'中山大学附属医院'});
+    } finally {await new Promise<void>((resolve)=>server.close(()=>resolve()));store.close();}
+  });
   it('群聊和私聊独立维护会话与成员备注，原始消息及创建者权限不受影响', async () => {
     const store=new Store(':memory:');store.record({...event('group','member-openid','msg-group'),senderName:'平台昵称',content:'原始消息',raw:{raw:{author:{member_role:'admin'}}}});
     store.record({...event('private','private-openid','msg-private'),scope:'c2c',senderName:'私聊昵称',content:'私聊内容'});

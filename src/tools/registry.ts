@@ -24,7 +24,7 @@ import { requestsGroupStyleChange } from '../agent/persona-intent.js';
 import { recordMetric } from '../agent/metrics.js';
 import { registerPluginTool } from './catalog.js';
 import { toolFailure, toolResult } from './results.js';
-import { attachmentSummary } from '../platform/qq/attachments.js';
+import { messageDetails } from '../agent/message-view.js';
 export { workspaceFor } from '../storage/workspace.js';
 
 export interface ToolContext {
@@ -60,16 +60,16 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
     tool(wrap(async () => ({ sandbox: 'docker-container', workspace: workspaceFor(ctx.conversationId), permissions: readConfig().sandbox.permissions, toolPermissions })), { name: 'sandbox_capabilities', description: '查看当前容器沙箱、会话工作目录和工具权限；主机上的工作区由管理员映射。', schema: z.object({}) }),
     tool(wrap(async ({ query,before }: { query: string;before?:number }) => {
       const rows = ctx.store.search(ctx.conversationId, query, 20,before);
-      return rows.map((row) => ({ sequence:row.seq,messageId:row.id,senderId: row.sender_id, senderName: row.sender_name, time: row.timestamp, content: row.content }));
-    }), { name: 'search_chat_history', description: '按关键词搜索当前会话历史原文，返回消息序号、发言人和时间；可用本页最小序号作为 before 查找更早记录，不受时间限制。', schema: z.object({ query: z.string().min(1).max(200),before:z.number().int().positive().optional() }) }),
+      return rows.map((row) => ({ sequence:row.seq,senderId: row.sender_id, senderName: row.sender_name, time: row.timestamp,...messageDetails(row) }));
+    }), { name: 'search_chat_history', description: '按关键词搜索当前会话历史正文及其中引用的原文，返回消息序号、发言人和时间；可用本页最小序号作为 before 查找更早记录，不受时间限制。', schema: z.object({ query: z.string().min(1).max(200),before:z.number().int().positive().optional() }) }),
     tool(wrap(async ({before,limit}:{before?:number;limit:number})=>{
-      const rows=ctx.store.db.prepare('SELECT seq,id,sender_id,sender_name,direction,timestamp,content,attachments FROM messages WHERE conversation_id=? AND seq<? ORDER BY seq DESC LIMIT ?').all(ctx.conversationId,before ?? Number.MAX_SAFE_INTEGER,limit+1) as Array<{seq:number;id:string;sender_id:string;sender_name:string|null;direction:string;timestamp:string;content:string;attachments:string}>;
-      const page=rows.slice(0,limit);return {messages:page.reverse().map((row)=>({sequence:row.seq,messageId:row.id,senderId:row.sender_id,senderName:row.sender_name,direction:row.direction,time:row.timestamp,content:row.content.slice(0,6000),contentTruncated:row.content.length>6000,attachments:attachmentSummary(row.attachments)})),hasMore:rows.length>limit,nextBefore:rows.length>limit?page[0]?.seq:null};
+      const rows=ctx.store.db.prepare('SELECT seq,id,sender_id,sender_name,direction,timestamp,content,attachments,raw FROM messages WHERE conversation_id=? AND seq<? ORDER BY seq DESC LIMIT ?').all(ctx.conversationId,before ?? Number.MAX_SAFE_INTEGER,limit+1) as Array<{seq:number;id:string;sender_id:string;sender_name:string|null;direction:string;timestamp:string;content:string;attachments:string;raw:string|null}>;
+      const page=rows.slice(0,limit);return {messages:page.reverse().map((row)=>({...messageDetails(row),sequence:row.seq,senderId:row.sender_id,senderName:row.sender_name,direction:row.direction,time:row.timestamp,content:row.content.slice(0,6000),contentTruncated:row.content.length>6000})),hasMore:rows.length>limit,nextBefore:rows.length>limit?page[0]?.seq:null};
     }),{name:'read_chat_history',description:'按顺序翻阅当前会话的历史聊天，保留发言人、时间、附件消息标识；可使用 before 继续查看更早内容，无需先知道关键词。长消息可用 read_chat_message 读取。',schema:z.object({before:z.number().int().positive().optional(),limit:z.number().int().min(1).max(50).default(25)})}),
     tool(wrap(async ({messageId,offset}:{messageId:string;offset:number})=>{
-      const row=ctx.store.db.prepare('SELECT seq,id,sender_id,sender_name,direction,timestamp,content,attachments FROM messages WHERE conversation_id=? AND id=?').get(ctx.conversationId,messageId) as {seq:number;id:string;sender_id:string;sender_name:string|null;direction:string;timestamp:string;content:string;attachments:string}|undefined;
+      const row=ctx.store.db.prepare('SELECT seq,id,sender_id,sender_name,direction,timestamp,content,attachments,raw FROM messages WHERE conversation_id=? AND id=?').get(ctx.conversationId,messageId) as {seq:number;id:string;sender_id:string;sender_name:string|null;direction:string;timestamp:string;content:string;attachments:string;raw:string|null}|undefined;
       if(!row)throw new Error('当前会话没有这条消息');const end=Math.min(row.content.length,offset+6000);
-      return {sequence:row.seq,messageId:row.id,senderId:row.sender_id,senderName:row.sender_name,direction:row.direction,time:row.timestamp,content:row.content.slice(offset,end),nextOffset:end<row.content.length?end:null,attachments:attachmentSummary(row.attachments)};
+      return {...messageDetails(row),sequence:row.seq,senderId:row.sender_id,senderName:row.sender_name,direction:row.direction,time:row.timestamp,content:row.content.slice(offset,end),nextOffset:end<row.content.length?end:null};
     }),{name:'read_chat_message',description:'读取当前会话一条历史消息的完整原文，长消息用 nextOffset 分段继续读取。',schema:z.object({messageId:z.string().min(1).max(300),offset:z.number().int().min(0).default(0)})}),
     tool(wrap(async ({query}:{query:string})=>{
       if(!isCommunityScope(ctx.scope)) throw new Error('只有群聊或频道会话可以查找成员');
@@ -236,7 +236,8 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
     tools.push(tool(wrap(async ({ progress }: { progress: string }) => { ctx.tasks.reportProgress(id, progress); return { queued: true }; }), { name: 'report_progress', description: '向主 Agent 报告值得告知群友的重大进展，不要为每个细节刷屏。', schema: z.object({ progress: z.string().min(1).max(1000) }) }));
   }
   const disabled = new Set<string>();
-  if (isCommunityScope(ctx.scope)) for (const name of groupSettings(ctx.store, ctx.conversationId).disabledTools) disabled.add(name);
+  const conversationMemoryTools=new Set(['search_chat_history','read_chat_history','read_chat_message']);
+  if (isCommunityScope(ctx.scope)) for (const name of groupSettings(ctx.store, ctx.conversationId).disabledTools) if(!conversationMemoryTools.has(name))disabled.add(name);
   if (!config.tools.search) { disabled.add('web_search'); disabled.add('research_web'); disabled.add('search_images'); disabled.add('download_file'); disabled.add('read_webpage'); }
   if (!config.tools.media) { disabled.add('download_media'); disabled.add('extract_audio'); disabled.add('inspect_media'); disabled.add('deliver_media'); }
   if (!config.tools.voice) { disabled.add('speak'); disabled.add('list_voices'); disabled.add('set_voice'); }

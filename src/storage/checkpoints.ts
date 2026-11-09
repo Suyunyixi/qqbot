@@ -8,7 +8,15 @@ const imagePattern=/"url":"data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-
 const referencePattern=/"url":"qqbot-image:([a-f0-9]{64}):(png|jpeg|gif|webp)"/g;
 
 /** 检查点只保存图片文件的内容哈希，恢复运行时按需读取原图。 */
-export function openCheckpointSaver(file:string, mediaRoot=path.join(dataDir,'attachments','checkpoints')):SqliteSaver {
+export function checkpointImageDataUrl(reference:string,mediaRoot=path.join(dataDir,'attachments','checkpoints')):string {
+  const match=/^qqbot-image:([a-f0-9]{64}):(png|jpeg|gif|webp)$/.exec(reference);
+  if(!match)throw new Error('检查点图片引用无效');
+  const bytes=fs.readFileSync(path.join(mediaRoot,match[1]!));
+  if(createHash('sha256').update(bytes).digest('hex')!==match[1])throw new Error('检查点图片校验失败');
+  return `data:image/${match[2]};base64,${bytes.toString('base64')}`;
+}
+
+export function openCheckpointSaver(file:string, mediaRoot=path.join(dataDir,'attachments','checkpoints'),lazyImages=false):SqliteSaver {
   const saver=SqliteSaver.fromConnString(file);
   const original=saver.serde;
   saver.serde={
@@ -29,10 +37,9 @@ export function openCheckpointSaver(file:string, mediaRoot=path.join(dataDir,'at
     },
     async loadsTyped(type,encoded) {
       if (type!=='json') return original.loadsTyped(type,encoded);
+      if (lazyImages) return original.loadsTyped(type,encoded);
       const content=(typeof encoded==='string'?encoded:Buffer.from(encoded).toString('utf8')).replace(referencePattern,(_match,digest:string,extension:string)=>{
-        const bytes=fs.readFileSync(path.join(mediaRoot,digest));
-        if (createHash('sha256').update(bytes).digest('hex')!==digest) throw new Error('检查点图片校验失败');
-        return `"url":"data:image/${extension};base64,${bytes.toString('base64')}"`;
+        return `"url":"${checkpointImageDataUrl(`qqbot-image:${digest}:${extension}`,mediaRoot)}"`;
       });
       return original.loadsTyped(type,content);
     },

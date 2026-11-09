@@ -2,7 +2,7 @@ import type { AppConfig } from '../config/settings.js';
 
 export type ToolPermission = 'network' | 'process' | 'workspaceRead' | 'workspaceWrite';
 export const toolPermissions: Record<string, readonly ToolPermission[]> = {
-  sandbox_capabilities: [], search_chat_history: [], read_chat_history: [], read_chat_message: [], find_chat_member: [], remember_fact: [], list_chat_images: [], read_chat_image: [],
+  sandbox_capabilities: [], search_chat_history: [], read_chat_history: [], read_chat_message: [], read_tool_result: ['workspaceRead'], find_chat_member: [], remember_fact: [], list_chat_images: [], read_chat_image: [],
   web_search: ['network'], research_web: ['network'], search_images: ['network'], read_webpage: ['network'], download_file: ['network', 'workspaceWrite'], current_time: [],
   download_media: ['network', 'process', 'workspaceWrite'],
   extract_audio: ['process', 'workspaceRead', 'workspaceWrite'],

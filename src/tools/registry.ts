@@ -25,6 +25,7 @@ import { recordMetric } from '../agent/metrics.js';
 import { registerPluginTool } from './catalog.js';
 import { toolFailure, toolResult } from './results.js';
 import { messageDetails } from '../agent/message-view.js';
+import { readToolResult } from '../agent/tool-results.js';
 export { workspaceFor } from '../storage/workspace.js';
 
 export interface ToolContext {
@@ -36,11 +37,11 @@ export interface ToolContext {
   tasks: TaskManager;
   background: boolean;
   taskId?: string;
+  turnId?: string;
   notificationKey?: string;
   signal?: AbortSignal;
   sentText?: boolean;
   owner?: boolean;
-  hasPendingContext?: () => boolean;
   qqApi?: SenderApi;
   actorId?: string;
   currentRequest?: string;
@@ -55,19 +56,26 @@ function wrap<T>(fn: (value: T) => Promise<unknown>): (value: T) => Promise<stri
 }
 export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=registeredPlugins()) {
   const config = readConfig();
-  const observeSearch=(entry:{started:number;status:'success'|'failed';usage?:{input_tokens:number;output_tokens:number;total_tokens:number}})=>recordMetric(ctx.store,{conversationId:ctx.conversationId,scope:ctx.scope,taskId:ctx.taskId},'联网搜索','DeepSeek 搜索',entry.started,entry.usage,entry.status);
+  const observeSearch=(entry:{started:number;status:'success'|'failed';usage?:{input_tokens:number;output_tokens:number;total_tokens:number}})=>recordMetric(ctx.store,{conversationId:ctx.conversationId,scope:ctx.scope,taskId:ctx.taskId,turnId:ctx.turnId},'联网搜索','DeepSeek 搜索',entry.started,entry.usage,entry.status);
   const tools: StructuredToolInterface[] = [
+    tool(wrap(async ({id,offset,limit}:{id:string;offset:number;limit:number})=>readToolResult(ctx.conversationId,id,offset,limit)),{name:'read_tool_result',description:'按工具结果标识和字符偏移读取已归档的完整大结果，使用 nextOffset 继续读取；仅访问当前会话。',schema:z.object({id:z.string().regex(/^[0-9a-f]{64}$/),offset:z.number().int().min(0).default(0),limit:z.number().int().min(1).max(12000).default(6000)})}),
     tool(wrap(async () => ({ sandbox: 'docker-container', workspace: workspaceFor(ctx.conversationId), permissions: readConfig().sandbox.permissions, toolPermissions })), { name: 'sandbox_capabilities', description: '查看当前容器沙箱、会话工作目录和工具权限；主机上的工作区由管理员映射。', schema: z.object({}) }),
     tool(wrap(async ({ query,before }: { query: string;before?:number }) => {
       const rows = ctx.store.search(ctx.conversationId, query, 20,before);
       return rows.map((row) => ({ sequence:row.seq,senderId: row.sender_id, senderName: row.sender_name, time: row.timestamp,...messageDetails(row) }));
     }), { name: 'search_chat_history', description: '按关键词搜索当前会话历史正文及其中引用的原文，返回消息序号、发言人和时间；可用本页最小序号作为 before 查找更早记录，不受时间限制。', schema: z.object({ query: z.string().min(1).max(200),before:z.number().int().positive().optional() }) }),
-    tool(wrap(async ({before,limit}:{before?:number;limit:number})=>{
-      const rows=ctx.store.db.prepare('SELECT seq,id,sender_id,sender_name,direction,timestamp,content,attachments,raw FROM messages WHERE conversation_id=? AND seq<? ORDER BY seq DESC LIMIT ?').all(ctx.conversationId,before ?? Number.MAX_SAFE_INTEGER,limit+1) as Array<{seq:number;id:string;sender_id:string;sender_name:string|null;direction:string;timestamp:string;content:string;attachments:string;raw:string|null}>;
-      const page=rows.slice(0,limit);return {messages:page.reverse().map((row)=>({...messageDetails(row),sequence:row.seq,senderId:row.sender_id,senderName:row.sender_name,direction:row.direction,time:row.timestamp,content:row.content.slice(0,6000),contentTruncated:row.content.length>6000})),hasMore:rows.length>limit,nextBefore:rows.length>limit?page[0]?.seq:null};
-    }),{name:'read_chat_history',description:'按顺序翻阅当前会话的历史聊天，保留发言人、时间、附件消息标识；可使用 before 继续查看更早内容，无需先知道关键词。长消息可用 read_chat_message 读取。',schema:z.object({before:z.number().int().positive().optional(),limit:z.number().int().min(1).max(50).default(25)})}),
+    tool(wrap(async ({before,limit,afterTime,beforeTime,senderId}:{before?:number;limit:number;afterTime?:string;beforeTime?:string;senderId?:string})=>{
+      if(afterTime && beforeTime && Date.parse(afterTime)>Date.parse(beforeTime))throw new Error('开始时间不能晚于结束时间');
+      const conditions=['conversation_id=?','seq<?'];
+      const values:Array<string|number>=[ctx.conversationId,before ?? Number.MAX_SAFE_INTEGER];
+      if(afterTime){conditions.push('julianday(timestamp)>=julianday(?)');values.push(afterTime);}
+      if(beforeTime){conditions.push('julianday(timestamp)<=julianday(?)');values.push(beforeTime);}
+      if(senderId){conditions.push('sender_id=?');values.push(senderId);}
+      const rows=ctx.store.db.prepare(`SELECT seq,id,sender_id,sender_name,direction,timestamp,content,attachments,raw,is_mention FROM messages WHERE ${conditions.join(' AND ')} ORDER BY seq DESC LIMIT ?`).all(...values,limit+1) as Array<{seq:number;id:string;sender_id:string;sender_name:string|null;direction:string;timestamp:string;content:string;attachments:string;raw:string|null;is_mention:number}>;
+      const page=rows.slice(0,limit);return {source:'本机已接收并保存的聊天记录；无法由此判断未接收的消息或补全 QQ 离线历史',messages:page.reverse().map((row)=>({...messageDetails(row),sequence:row.seq,senderId:row.sender_id,senderName:row.sender_name,direction:row.direction,time:row.timestamp,content:row.content.slice(0,6000),contentTruncated:row.content.length>6000})),hasMore:rows.length>limit,nextBefore:rows.length>limit?page[0]?.seq:null};
+    }),{name:'read_chat_history',description:'查询当前会话已保存的近期或历史聊天，按时间顺序返回发言人、原文、引用和附件标识；可按时间或发送者筛选，无需关键词。before 用于翻页；长消息用 read_chat_message 读取。结果仅包含机器人接收并保存过的消息。',schema:z.object({before:z.number().int().positive().optional(),limit:z.number().int().min(1).max(100).default(25),afterTime:z.string().datetime({offset:true}).optional(),beforeTime:z.string().datetime({offset:true}).optional(),senderId:z.string().min(1).max(300).optional()})}),
     tool(wrap(async ({messageId,offset}:{messageId:string;offset:number})=>{
-      const row=ctx.store.db.prepare('SELECT seq,id,sender_id,sender_name,direction,timestamp,content,attachments,raw FROM messages WHERE conversation_id=? AND id=?').get(ctx.conversationId,messageId) as {seq:number;id:string;sender_id:string;sender_name:string|null;direction:string;timestamp:string;content:string;attachments:string;raw:string|null}|undefined;
+      const row=ctx.store.db.prepare('SELECT seq,id,sender_id,sender_name,direction,timestamp,content,attachments,raw,is_mention FROM messages WHERE conversation_id=? AND id=?').get(ctx.conversationId,messageId) as {seq:number;id:string;sender_id:string;sender_name:string|null;direction:string;timestamp:string;content:string;attachments:string;raw:string|null;is_mention:number}|undefined;
       if(!row)throw new Error('当前会话没有这条消息');const end=Math.min(row.content.length,offset+6000);
       return {...messageDetails(row),sequence:row.seq,senderId:row.sender_id,senderName:row.sender_name,direction:row.direction,time:row.timestamp,content:row.content.slice(offset,end),nextOffset:end<row.content.length?end:null};
     }),{name:'read_chat_message',description:'读取当前会话一条历史消息的完整原文，长消息用 nextOffset 分段继续读取。',schema:z.object({messageId:z.string().min(1).max(300),offset:z.number().int().min(0).default(0)})}),
@@ -77,7 +85,7 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
       const oldNames=ctx.store.db.prepare("SELECT sender_id,sender_name,MAX(seq) AS last_seq FROM messages WHERE scope=? AND conversation_id=? AND direction='in' AND sender_name IS NOT NULL AND instr(lower(sender_name),?)>0 GROUP BY sender_id,sender_name ORDER BY last_seq DESC LIMIT 100").all(ctx.scope,ctx.conversationId,term) as Array<{sender_id:string;sender_name:string}>;
       const matches=ctx.store.memory.listConversationMembers(ctx.scope,ctx.conversationId)
         .filter((member)=>[member.external_id,member.display_name,member.remark_name].some((value)=>value?.toLocaleLowerCase().includes(term)) || oldNames.some((item)=>item.sender_id===member.external_id))
-        .slice(0,30).map((member)=>({memberId:member.external_id,name:member.display_name,remark:member.remark_name,matchingHistoricalNames:oldNames.filter((item)=>item.sender_id===member.external_id).map((item)=>item.sender_name)}));
+        .slice(0,30).map((member)=>({memberId:member.external_id,name:member.display_name,remark:member.remark_name,matchingHistoricalNames:oldNames.filter((item)=>item.sender_id===member.external_id).map((item)=>item.sender_name),mention:/^[A-Za-z0-9_-]{1,200}$/.test(member.external_id)?`<qqbot-at-user id="${member.external_id}" />`:undefined}));
       return {members:matches,hint:'结合对话判断身份；需要 @ 时将确认的 memberId 填入 <qqbot-at-user id="成员标识" />，不要把昵称当作标识。'};
     }),{name:'find_chat_member',description:'按当前名称、历史发言名称、人工备注或成员标识查找当前群聊或频道已记录的成员；身份不清时结合聊天原文核对，不要猜测。',schema:z.object({query:z.string().trim().min(1).max(200)})}),
     tool(wrap(async ({ query, queries, range }: { query?: string; queries?: string[]; range: 'any'|'day'|'week'|'month'|'year' }) => searchWeb([...(query?[query]:[]),...(queries??[])],{range,observe:observeSearch})), { name: 'web_search', description: '真实联网搜索，支持多个关键词和时间范围，返回来源链接、发布时间、查询时间及 provider 状态；先思考检索方向，再查证原文；空结果不代表事实。', schema: z.object({ query: z.string().min(1).max(500).optional(), queries: z.array(z.string().min(1).max(500)).max(4).optional(), range: z.enum(['any','day','week','month','year']).default('any') }) }),
@@ -114,12 +122,10 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
   tools.push(
     tool(wrap(async (embed:{title:string;prompt:string;thumbnail?:{url:string};fields:Array<{name:string}>})=>{
       if(ctx.scope!=='guild' && ctx.scope!=='dm')throw new Error('QQ Embed 当前仅支持频道和频道私信');
-      if(ctx.hasPendingContext?.())throw new Error('群聊出现新的插话，请先结合最新群消息');
       const payload=JSON.stringify(embed);const key=ctx.taskId?`task:${ctx.taskId}:embed:${createHash('sha256').update(payload).digest('hex')}`:undefined;
       await ctx.reply.send(ctx.conversationId,ctx.scope,ctx.replyTo,'embed',payload,undefined,key);return {sent:true};
     }),{name:'send_embed',description:'向 QQ 文字子频道或频道私信发送官方 Embed 卡片；群聊和普通私聊不支持。',schema:z.object({title:z.string().min(1).max(200),prompt:z.string().max(200),thumbnail:z.object({url:z.string().url()}).optional(),fields:z.array(z.object({name:z.string().max(200)})).max(10)})}),
     tool(wrap(async ({text,buttons}:{text:string;buttons:Array<{label:string;data:string}>})=>{
-      if(ctx.hasPendingContext?.())throw new Error('群聊出现新的插话，请先结合最新群消息');
       const payload=JSON.stringify({text,buttons});const key=ctx.taskId?`task:${ctx.taskId}:keyboard:${createHash('sha256').update(payload).digest('hex')}`:undefined;
       await ctx.reply.send(ctx.conversationId,ctx.scope,ctx.replyTo,'keyboard',payload,undefined,key);return {sent:true};
     }),{name:'send_keyboard',description:'发送 QQ 原生交互按钮；用户点击后会作为当前会话中的回复交给你处理。按钮可用于选择，受 QQ 平台权限和客户端支持限制。',schema:z.object({text:z.string().min(1).max(1000),buttons:z.array(z.object({label:z.string().min(1).max(30),data:z.string().min(1).max(200)})).min(1).max(5)})}),
@@ -133,7 +139,6 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
     }), { name:'run_shell_command', description:'在隔离 Docker 中真实执行 shell 命令，支持联网、curl、git、ffmpeg、Python 与子进程；inputs 指定工作区输入文件，outputs 指定需要带回的相对文件或目录，省略时带回变化文件。返回退出码、输出及工作区产物。长任务交给后台。', schema:z.object({command:z.string().min(1).max(30000),inputs:z.array(z.string()).max(126).default([]),outputs:z.array(z.string()).max(128).optional(),timeoutSeconds:z.number().int().min(1).max(900).default(20)}) }),
     tool(wrap(async (data: { title: string; subtitle?: string; items: Array<{ title: string; description?: string }> }) => renderImageCard(ctx.conversationId, data, ctx.signal)), { name: 'render_image_card', description: '只有用户明确要求图片、海报或榜单图时，使用结构化数据渲染带中文的 PNG；返回路径后用 send_media 发送。普通“卡片”默认调用 send_native_card，不使用本工具。', schema: z.object({ title: z.string().min(1).max(100), subtitle: z.string().max(200).optional(), items: z.array(z.object({ title: z.string().min(1).max(200), description: z.string().max(300).optional() })).min(1).max(10) }) }),
     tool(wrap(async (card: z.infer<typeof nativeCardSchema>) => {
-      if (ctx.hasPendingContext?.()) throw new Error('群聊出现新的插话，请先结合最新群消息再交付');
       buildNativeArk(card); // Validate before any delivery is queued.
       const payload = JSON.stringify(card);
       const key = ctx.taskId ? `task:${ctx.taskId}:card:${createHash('sha256').update(payload).digest('hex')}` : undefined;
@@ -141,7 +146,6 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
       return { sent: true, kind: 'qq_ark_card' };
     }), { name: 'send_native_card', description: '发送 QQ 原生 ARK 卡片。单条链接 link，多条榜单 list，大图链接 cover；已获授权的其他模板可使用 custom 并提供模板 ID 和字段。链接必须是真实来源；平台拒绝时如实说明。', schema: nativeCardSchema }),
     tool(wrap(async ({ text }: { text: string }) => {
-      if (ctx.hasPendingContext?.()) throw new Error('群聊出现新的插话，请先结合最新群消息再回复');
       if (ctx.background) {
         if (!ctx.taskId) throw new Error('后台进度缺少任务标识');
         await ctx.tasks.reportProgressAndWait(ctx.taskId, text);
@@ -159,7 +163,6 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
         if (!config.tools.python || !permitted(['process', 'workspaceRead', 'workspaceWrite'], config)) throw new Error('SVG 图片需要启用 Python 沙箱和工作区读写权限才能转换发送');
         actual = (await rasterizeSvg(ctx.conversationId, actual, ctx.signal)).path;
       }
-      if (ctx.hasPendingContext?.()) throw new Error('群聊出现新的插话，请先结合最新群消息再交付');
       const types = { image: MediaFileType.IMAGE, video: MediaFileType.VIDEO, voice: MediaFileType.VOICE, file: MediaFileType.FILE } as const;
       if (kind in types) { const size = fs.statSync(actual).size; const max = getMaxUploadSize(types[kind as keyof typeof types]); if (!size || size > max) throw new Error(`文件大小 ${size} 字节不符合 QQ 上传上限 ${max} 字节，文件仍保留在工作区`); }
       await ctx.reply.send(ctx.conversationId, ctx.scope, ctx.replyTo, kind, actual, path.basename(actual), deliveryKey);
@@ -236,7 +239,7 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
     tools.push(tool(wrap(async ({ progress }: { progress: string }) => { ctx.tasks.reportProgress(id, progress); return { queued: true }; }), { name: 'report_progress', description: '向主 Agent 报告值得告知群友的重大进展，不要为每个细节刷屏。', schema: z.object({ progress: z.string().min(1).max(1000) }) }));
   }
   const disabled = new Set<string>();
-  const conversationMemoryTools=new Set(['search_chat_history','read_chat_history','read_chat_message']);
+  const conversationMemoryTools=new Set(['search_chat_history','read_chat_history','read_chat_message','read_tool_result']);
   if (isCommunityScope(ctx.scope)) for (const name of groupSettings(ctx.store, ctx.conversationId).disabledTools) if(!conversationMemoryTools.has(name))disabled.add(name);
   if (!config.tools.search) { disabled.add('web_search'); disabled.add('research_web'); disabled.add('search_images'); disabled.add('download_file'); disabled.add('read_webpage'); }
   if (!config.tools.media) { disabled.add('download_media'); disabled.add('extract_audio'); disabled.add('inspect_media'); disabled.add('deliver_media'); }

@@ -3,8 +3,8 @@ import { attachmentSummary } from '../platform/qq/attachments.js';
 import { quotedMessage } from './quoted-message.js';
 
 /** 所有读取入口共用同一份消息内容，避免正文、引用或附件信息不一致。 */
-export function messageDetails(row:Pick<MessageRow,'id'|'content'|'attachments'|'raw'>) {
-  return {messageId:row.id,content:row.content,quotedContent:quotedMessage(row.raw),attachments:row.attachments==='[]'?'':attachmentSummary(row.attachments)};
+export function messageDetails(row:Pick<MessageRow,'id'|'content'|'attachments'|'raw'|'is_mention'>) {
+  return {messageId:row.id,content:row.content,quotedContent:quotedMessage(row.raw),attachments:row.attachments==='[]'?'':attachmentSummary(row.attachments),mentionedBot:row.is_mention===undefined?undefined:row.is_mention===1};
 }
 
 export function renderMessage(row:MessageRow, options:{marker?:string;contentLimit?:number;attachmentLimit?:number}={}):string {
@@ -13,7 +13,7 @@ export function renderMessage(row:MessageRow, options:{marker?:string;contentLim
   const limit=options.contentLimit;
   const content=limit && item.content.length>limit ? `${item.content.slice(0,Math.floor(limit/2))} … [本条节选，可按消息标识读取原文] … ${item.content.slice(-Math.floor(limit/2))}` : item.content;
   const attachment=options.attachmentLimit ? item.attachments.slice(0,options.attachmentLimit) : item.attachments;
-  return `[${row.timestamp}${options.marker ? ` · ${options.marker}` : ''}] ${speaker}${row.direction==='out'?'(机器人)':''}：${content}\n  消息标识:${row.id}${item.quotedContent?`\n  该消息引用的原文：${item.quotedContent}`:''}${attachment?`\n  附件消息标识:${row.id} 附件:${attachment}`:''}`;
+  return `[${row.timestamp}${options.marker ? ` · ${options.marker}` : ''}] ${speaker}${row.direction==='out'?'(机器人)':''}${item.mentionedBot?'（@机器人）':''}：${content}\n  消息标识:${row.id}${item.quotedContent?`\n  该消息引用的原文：${item.quotedContent}`:''}${attachment?`\n  附件消息标识:${row.id} 附件:${attachment}`:''}`;
 }
 
 /** 按完整消息保留最新记录，超长消息保留标识，方便模型读取原文。 */

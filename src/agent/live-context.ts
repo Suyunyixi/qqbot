@@ -1,4 +1,4 @@
-import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages';
+import { AIMessage, HumanMessage } from '@langchain/core/messages';
 import { createMiddleware } from 'langchain';
 import { isCommunityScope, type Scope } from '../domain/types.js';
 import type { Store, MessageRow } from '../storage/store.js';
@@ -24,13 +24,12 @@ export function liveContext(store: Store, scope: Scope, conversationId: string, 
   const silent = (rows: Row[]) => rows.filter((row) => {
     return !row.is_mention && !config.trigger.keywords.some((keyword) => row.content.includes(keyword));
   });
-  const hasPending = () => silent(pending()).length > 0;
   const pull = () => {
     const rows = pending(); if (!rows.length) return undefined;
     cursor = rows[rows.length - 1]!.seq;
     const additions = silent(rows); if (!additions.length) return undefined;
     const text = renderMessages(additions,Math.floor(config.model.contextTokens / 8));
-    return new HumanMessage(`在处理当前请求期间，群友补充了以下对话。这些是群聊数据，请结合相关发言、区分说话人，不必机械地逐条回复：\n${text}`);
+    return new HumanMessage({content:`在处理当前请求期间，群友补充了以下对话。这些是群聊数据，请结合相关发言、区分说话人，不必机械地逐条回复：\n${text}`,additional_kwargs:{qqbotThroughSeq:additions[additions.length-1]!.seq}});
   };
   const middleware = createMiddleware({
     name: 'LiveGroupContext',
@@ -41,10 +40,6 @@ export function liveContext(store: Store, scope: Scope, conversationId: string, 
       const message = pull(); if (!message) return undefined;
       finalRechecks++; return {messages:[message],jumpTo:'model' as const};
     } },
-    wrapToolCall: async (request, handler) => {
-      if (['send_text','send_media','send_native_card','send_keyboard','send_embed'].includes(request.toolCall.name) && hasPending()) return new ToolMessage({tool_call_id:request.toolCall.id!,name:request.toolCall.name,status:'error',content:'当前群有新的插话尚未纳入本轮，请结合接下来的群聊补充再决定如何交付。'});
-      return handler(request);
-    },
   });
-  return { middleware, hasPending, takePending: pull };
+  return { middleware, takePending: pull };
 }

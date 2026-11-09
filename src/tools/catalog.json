@@ -208,5 +208,10 @@
     "category": "记忆与会话",
     "label": "读取完整消息",
     "description": "查看某条历史消息的原文；长消息可分段读取。"
+  },
+  "read_tool_result": {
+    "category": "工具目录",
+    "label": "读取完整工具结果",
+    "description": "按段读取当前会话中归档的大型工具结果。"
   }
 }

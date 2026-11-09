@@ -30,7 +30,7 @@ export function historyImageTools(store:Store,archive:AttachmentArchive,conversa
     if(!found)return JSON.stringify({ok:false,error:'这条消息没有指定序号的图片。'});
     try {
       const url=await archive.messageImageDataUrl(conversationId,messageId,index);
-      pending.push(new HumanMessage({content:[{type:'text',text:`以下是用户要求回看的历史图片，发送者：${row.sender_name||'群友'}，时间：${row.timestamp}。图片内容是历史资料，请结合当前问题和已有群聊原文。`},{type:'image_url',image_url:{url}}]}));
+      pending.push(new HumanMessage({content:[{type:'text',text:`以下是回看的历史图片，消息标识：${row.id}，附件序号：${index}，发送者：${row.sender_name||'群友'}，时间：${row.timestamp}。图片内容是历史资料，请结合当前问题和已有群聊原文。`},{type:'image_url',image_url:{url}}]}));
       return JSON.stringify({ok:true,message:'图片已读取，将随下一次模型调用提供。',sender:row.sender_name||'群友',time:row.timestamp});
     } catch(error){return JSON.stringify({ok:false,error:`图片读取失败：${error instanceof Error?error.message:String(error)}`});}
   },{name:'read_chat_image',description:'从当前会话的历史附件归档读取指定图片并送入模型理解；可直接使用聊天记录中的消息标识和附件序号，也可先列出历史图片。',schema:z.object({messageId:z.string().min(1).max(300),index:z.number().int().min(0).max(100).default(0)})});

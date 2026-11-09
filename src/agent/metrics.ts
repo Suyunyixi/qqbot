@@ -3,21 +3,30 @@ import { createMiddleware } from 'langchain';
 import type { Store } from '../storage/store.js';
 import type { Scope } from '../domain/types.js';
 
-type Identity={conversationId:string;scope:Scope;taskId?:string};
+type Identity={conversationId:string;scope:Scope;taskId?:string;turnId?:string};
+type Usage={input_tokens?:number;output_tokens?:number;total_tokens?:number;input_token_details?:{cache_read?:number};output_token_details?:{reasoning?:number}};
+function numberValue(...values:unknown[]):number|null {
+  return values.find((value)=>typeof value==='number' && Number.isSafeInteger(value) && value>=0) as number|undefined ?? null;
+}
 export function recordMetric(store:Store, identity:Identity, phase:string, name:string, started:number, result:unknown, status:'success'|'failed'):void {
   try {
-    const usage=result instanceof AIMessage ? result.usage_metadata : result && typeof result==='object' && 'input_tokens' in result ? result as {input_tokens?:number;output_tokens?:number;total_tokens?:number} : undefined;
-    store.db.prepare('INSERT INTO execution_metrics(conversation_id,scope,task_id,phase,name,duration_ms,status,input_tokens,output_tokens,total_tokens,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(identity.conversationId,identity.scope,identity.taskId ?? null,phase,name,Math.max(0,Date.now()-started),status,usage?.input_tokens ?? null,usage?.output_tokens ?? null,usage?.total_tokens ?? null,new Date().toISOString());
+    const usage:Usage|undefined=result instanceof AIMessage ? result.usage_metadata : result && typeof result==='object' && 'input_tokens' in result ? result as Usage : undefined;
+    const metadata=result instanceof AIMessage ? result.response_metadata as {usage?:{prompt_cache_hit_tokens?:unknown;prompt_cache_miss_tokens?:unknown;prompt_tokens_details?:{cached_tokens?:unknown};completion_tokens_details?:{reasoning_tokens?:unknown}};tokenUsage?:{prompt_cache_hit_tokens?:unknown;prompt_cache_miss_tokens?:unknown}} : undefined;
+    const raw=metadata?.usage;
+    const cached=numberValue(usage?.input_token_details?.cache_read,raw?.prompt_cache_hit_tokens,raw?.prompt_tokens_details?.cached_tokens,metadata?.tokenUsage?.prompt_cache_hit_tokens);
+    const missed=numberValue(raw?.prompt_cache_miss_tokens,metadata?.tokenUsage?.prompt_cache_miss_tokens);
+    const reasoning=numberValue(usage?.output_token_details?.reasoning,raw?.completion_tokens_details?.reasoning_tokens);
+    store.db.prepare('INSERT INTO execution_metrics(conversation_id,scope,task_id,turn_id,phase,name,duration_ms,status,input_tokens,output_tokens,total_tokens,cache_read_tokens,cache_miss_tokens,reasoning_tokens,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(identity.conversationId,identity.scope,identity.taskId ?? null,identity.turnId ?? null,phase,name,Math.max(0,Date.now()-started),status,usage?.input_tokens ?? null,usage?.output_tokens ?? null,usage?.total_tokens ?? null,cached,missed,reasoning,new Date().toISOString());
   } catch(error) {console.error('运行指标保存失败：',error instanceof Error?error.message:String(error));}
 }
 
 function startToolMetric(store:Store,identity:Identity,name:string):number|bigint|undefined {
-  try {return store.db.prepare("INSERT INTO execution_metrics(conversation_id,scope,task_id,phase,name,duration_ms,status,created_at) VALUES(?,?,?,'工具',?,0,'running',?)").run(identity.conversationId,identity.scope,identity.taskId ?? null,name,new Date().toISOString()).lastInsertRowid;}
+  try {return store.db.prepare("INSERT INTO execution_metrics(conversation_id,scope,task_id,turn_id,phase,name,duration_ms,status,created_at) VALUES(?,?,?,?,'工具',?,0,'running',?)").run(identity.conversationId,identity.scope,identity.taskId ?? null,identity.turnId ?? null,name,new Date().toISOString()).lastInsertRowid;}
   catch(error){console.error('工具运行记录保存失败：',error instanceof Error?error.message:String(error));return undefined;}
 }
-function finishToolMetric(store:Store,id:number|bigint|undefined,started:number,status:'success'|'failed'|'partial'):void {
+function finishToolMetric(store:Store,id:number|bigint|undefined,started:number,status:'success'|'failed'|'partial',characters?:number):void {
   if(id===undefined)return;
-  try {store.db.prepare('UPDATE execution_metrics SET duration_ms=?,status=? WHERE seq=?').run(Math.max(0,Date.now()-started),status,id);}
+  try {store.db.prepare('UPDATE execution_metrics SET duration_ms=?,status=?,result_characters=? WHERE seq=?').run(Math.max(0,Date.now()-started),status,characters ?? null,id);}
   catch(error){console.error('工具运行记录更新失败：',error instanceof Error?error.message:String(error));}
 }
 
@@ -35,7 +44,7 @@ export function metricsMiddleware(store:Store,identity:Identity,phase:string,mod
       try {
         const result=await handler(request);let failed='status' in result && result.status==='error';let partial=false;
         if('content' in result && typeof result.content==='string')try {const parsed=JSON.parse(result.content);failed ||= parsed?.ok===false;partial=parsed?.status==='partial';} catch { /* 普通文本结果无需解析。 */ }
-        finishToolMetric(store,metricId,started,failed?'failed':partial?'partial':'success');return result;
+        finishToolMetric(store,metricId,started,failed?'failed':partial?'partial':'success','content' in result && typeof result.content==='string'?result.content.length:undefined);return result;
       }
       catch(error) {finishToolMetric(store,metricId,started,'failed');throw error;}
     },

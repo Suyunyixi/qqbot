@@ -39,7 +39,6 @@ export async function deliverMedia(ctx: ToolContext, request: { source: string; 
   if (size > max) { log(`文件超过 QQ 上传上限，已保留产物：${file}`); return { path: file, original, size, kind, delivered: false, error: `文件超过 QQ SDK 的 ${kind} 上传上限 ${max} 字节，产物已保留在工作区` }; }
   const key = ctx.taskId ? `task:${ctx.taskId}:media:${createHash('sha256').update(`${request.source}\0${request.format}\0${kind}`).digest('hex')}` : undefined;
   try {
-    if (ctx.hasPendingContext?.()) throw new Error('群聊出现新的插话，请先结合最新群消息再交付');
     log(`准备发送 ${kind}，大小 ${size} 字节`);
     await ctx.reply.send(ctx.conversationId, ctx.scope, ctx.replyTo, kind, file, path.basename(file), key);
   } catch (error) {

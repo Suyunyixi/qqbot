@@ -6,13 +6,14 @@ import { Store, type TaskRow } from '../storage/store.js';
 import { TaskManager } from './task-manager.js';
 import { shouldRespond } from './trigger.js';
 import { isCommunityScope, type InboundEvent, type Sender } from '../domain/types.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { BalanceAlert, balanceAlertText, isBalanceError } from './balance-alert.js';
 import { AttachmentArchive } from '../storage/attachments.js';
 
 export function replyForChatError(error: unknown): string {
   const status=typeof error==='object' && error!==null && 'status' in error ? Number(error.status) : undefined;
   const message=error instanceof Error ? error.message : String(error);
+  if (/recursion limit.*reached/i.test(message)) return '这次处理步骤超过上限，没能完成；可以让我缩小范围再试一次。';
   if (status===402 || /\b402\b/.test(message)) {
     return isBalanceError(error)
       ? '模型服务余额或额度不足，暂时无法回复，请联系管理员检查。'
@@ -40,16 +41,25 @@ export class Harness {
       catch(error) {void this.balanceAlert.report(error);throw error;}
     }, (task) => this.callback(task));
   }
-  start(): void { this.store.db.prepare("UPDATE execution_metrics SET status='interrupted' WHERE phase='工具' AND status='running'").run();this.store.recoverSending(); this.tasks.start(); }
-  async receive(event: InboundEvent): Promise<boolean> {
-    if (!this.store.record(event)) return false;
+  start(): void { this.store.db.prepare("UPDATE execution_metrics SET status='interrupted' WHERE phase='工具' AND status='running'").run();this.store.db.prepare("UPDATE chat_turns SET status='interrupted',finished_at=? WHERE status IN ('queued','running')").run(new Date().toISOString());this.store.recoverSending(); this.tasks.start(); }
+  async receive(event: InboundEvent, commitCursor?:()=>void, onPersistFailure?:(error:unknown)=>void): Promise<boolean> {
+    let recorded:boolean;
+    try {recorded=commitCursor?this.store.db.transaction(()=>{const created=this.store.record(event);commitCursor();return created;})():this.store.record(event);}
+    catch(error){onPersistFailure?.(error);throw error;}
+    if (!recorded) return false;
     this.attachments.enqueue(event);
     // 在 Agent 图之前快速过滤，确保普通群消息只记录、不调用模型。
     if (isCommunityScope(event.scope) && !groupSettings(this.store, event.conversationId).enabled) return false;
     if (!shouldRespond(event, effectiveTrigger(this.store, event.scope, event.conversationId))) return false;
     const owner = this.store.memory.isOwner(event.scope, event.conversationId, event.senderId);
+    const turnId=randomUUID();const received=Date.now();
+    try {this.store.db.prepare("INSERT INTO chat_turns(id,conversation_id,scope,message_id,status,received_at) VALUES(?,?,?,?,'queued',?)").run(turnId,event.conversationId,event.scope,event.id,new Date(received).toISOString());}
+    catch(error){console.error('记录会话回合失败：',error instanceof Error?error.message:String(error));}
     void this.schedule(event.conversationId, async () => {
-      await this.agent.respond({ conversationId: event.conversationId, scope: event.scope, replyTo: event.id, actorId:event.senderId, store: this.store, reply: this.reply, tasks: this.tasks, background: false, owner, qqApi:this.sender.qqApi?.bind(this.sender) }, event);
+      const started=Date.now();
+      try {this.store.db.prepare("UPDATE chat_turns SET status='running',started_at=?,queue_ms=? WHERE id=?").run(new Date(started).toISOString(),started-received,turnId);}catch(error){console.error('记录回合开始失败：',error instanceof Error?error.message:String(error));}
+      await this.agent.respond({ conversationId: event.conversationId, scope: event.scope, replyTo: event.id, actorId:event.senderId, store: this.store, reply: this.reply, tasks: this.tasks, background: false, owner, turnId, qqApi:this.sender.qqApi?.bind(this.sender) }, event);
+      try {this.store.db.prepare("UPDATE chat_turns SET status='completed',finished_at=?,duration_ms=? WHERE id=?").run(new Date().toISOString(),Date.now()-received,turnId);}catch(error){console.error('记录回合完成失败：',error instanceof Error?error.message:String(error));}
       this.agent.compactFinishedConversation(event.scope,event.conversationId);
       this.balanceAlert.recovered();
       this.agent.scheduleMemory(event.conversationId, this.store.eventSeq(event.conversationId, event.id));
@@ -66,6 +76,7 @@ export class Harness {
         if (ownerBalance) void this.balanceAlert.report(err);
         console.error('错误提示发送失败：', sendError instanceof Error ? sendError.message : sendError);
       }
+      try {this.store.db.prepare("UPDATE chat_turns SET status='failed',finished_at=?,duration_ms=? WHERE id=?").run(new Date().toISOString(),Date.now()-received,turnId);}catch(error){console.error('记录回合失败状态失败：',error instanceof Error?error.message:String(error));}
     });
     return true;
   }

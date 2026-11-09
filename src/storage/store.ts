@@ -46,6 +46,12 @@ export class Store {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS execution_metrics_time ON execution_metrics(created_at);
+      CREATE TABLE IF NOT EXISTS chat_turns (
+        id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, scope TEXT NOT NULL, message_id TEXT NOT NULL,
+        status TEXT NOT NULL, received_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
+        queue_ms INTEGER, duration_ms INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS chat_turns_time ON chat_turns(received_at);
       CREATE TABLE IF NOT EXISTS tool_discoveries (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL, scope TEXT NOT NULL,
         task_id TEXT, query TEXT NOT NULL, candidates TEXT NOT NULL, created_at TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'search'
@@ -111,6 +117,10 @@ export class Store {
     if(!taskColumns.some((column)=>column.name==='actor_id'))this.db.exec('ALTER TABLE tasks ADD COLUMN actor_id TEXT');
     const discoveryColumns=this.db.prepare('PRAGMA table_info(tool_discoveries)').all() as Array<{name:string}>;
     if(!discoveryColumns.some((column)=>column.name==='kind'))this.db.exec("ALTER TABLE tool_discoveries ADD COLUMN kind TEXT NOT NULL DEFAULT 'search'");
+    const metricColumns=this.db.prepare('PRAGMA table_info(execution_metrics)').all() as Array<{name:string}>;
+    for(const [name,type] of [['turn_id','TEXT'],['cache_read_tokens','INTEGER'],['cache_miss_tokens','INTEGER'],['reasoning_tokens','INTEGER'],['result_characters','INTEGER']] as const)
+      if(!metricColumns.some((column)=>column.name===name))this.db.exec(`ALTER TABLE execution_metrics ADD COLUMN ${name} ${type}`);
+    this.db.exec('CREATE INDEX IF NOT EXISTS execution_metrics_turn ON execution_metrics(turn_id)');
     this.memory = new MemoryRepository(this.db);
     this.memory.bootstrapOwner(this.qqCredentials()?.userOpenid);
   }
@@ -251,5 +261,5 @@ export class Store {
   recoverSending(): void { this.db.prepare("UPDATE outbox SET status='unknown',error='发送中断，结果未知，未自动重发' WHERE status='sending'").run(); }
   close(): void { this.db.close(); }
 }
-export interface MessageRow { seq: number; id: string; sender_id: string; sender_name: string | null; content: string; timestamp: string; direction: string; attachments: string; raw?: string | null }
+export interface MessageRow { seq: number; id: string; sender_id: string; sender_name: string | null; content: string; timestamp: string; direction: string; attachments: string; raw?: string | null; is_mention?: number }
 export interface TaskRow { id: string; conversation_id: string; scope: Scope; reply_to: string | null; instruction: string; status: string; result: string | null; error: string | null; notified: number; actor_id?:string|null }

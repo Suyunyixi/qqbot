@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import type { InboundEvent } from '../src/domain/types.js';
-import { ToolMessage } from '@langchain/core/messages';
+import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages';
 
 process.env.BOT_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-features-'));
 const { initConfig, readConfig, setRuntimeConfigProvider } = await import('../src/config/settings.js'); initConfig();
@@ -22,14 +22,14 @@ const { capabilityManifest } = await import('../src/agent/capabilities.js');
 const { quotedMessage } = await import('../src/agent/quoted-message.js');
 const { internalSubagentTools } = await import('../src/agent/subagent-policy.js');
 const { conversationFocus, formatConversationFocus } = await import('../src/agent/conversation-focus.js');
-const { conversationReview } = await import('../src/agent/conversation-review.js');
 const { BalanceAlert, isBalanceError } = await import('../src/agent/balance-alert.js');
 const { AttachmentArchive } = await import('../src/storage/attachments.js');
 const { doctor } = await import('../src/startup/doctor.js');
 const { memoryBudgetReached, pendingMemoryCharacters } = await import('../src/agent/memory-budget.js');
 const { QQGroupProfiles } = await import('../src/platform/qq/group-profiles.js');
 const { createToolDiscovery } = await import('../src/agent/tool-discovery.js');
-const { metricsMiddleware } = await import('../src/agent/metrics.js');
+const { metricsMiddleware, recordMetric } = await import('../src/agent/metrics.js');
+const { largeToolResults, readToolResult } = await import('../src/agent/tool-results.js');
 const { historyImageTools } = await import('../src/agent/history-images.js');
 function event(group:string,user:string,id:string): InboundEvent { return { id,conversationId:group,scope:'group',senderId:user,senderName:user,content:'消息',timestamp:new Date().toISOString(),isMention:false,attachments:[] }; }
 
@@ -73,6 +73,30 @@ describe('全局用户记忆和创建者权限', () => {
       release();await pending;
       expect(store.db.prepare("SELECT status FROM execution_metrics WHERE name='inspect_media'").all()).toEqual([{status:'success'}]);
     } finally {release?.();store.close();}
+  });
+  it('记录服务商返回的缓存与思考用量，缺失字段保持未知', () => {
+    const store=new Store(':memory:');
+    try {
+      const message=new AIMessage({content:'完成',usage_metadata:{input_tokens:100,output_tokens:20,total_tokens:120,input_token_details:{cache_read:40},output_token_details:{reasoning:7}},response_metadata:{usage:{prompt_cache_miss_tokens:60}}});
+      recordMetric(store,{conversationId:'g',scope:'group',turnId:'turn-a'},'主回复','模拟模型',Date.now(),message,'success');
+      recordMetric(store,{conversationId:'g',scope:'group'},'主回复','模拟模型',Date.now(),new AIMessage('完成'),'success');
+      const rows=store.db.prepare('SELECT turn_id,cache_read_tokens,cache_miss_tokens,reasoning_tokens FROM execution_metrics ORDER BY seq').all();
+      expect(rows).toEqual([{turn_id:'turn-a',cache_read_tokens:40,cache_miss_tokens:60,reasoning_tokens:7},{turn_id:null,cache_read_tokens:null,cache_miss_tokens:null,reasoning_tokens:null}]);
+    } finally {store.close();}
+  });
+  it('大型工具结果完整归档，可分页回读且不跨会话访问', async () => {
+    const content='群聊资料'.repeat(10000)+'最后内容';
+    const middleware=largeToolResults('归档所属会话');
+    const original=new ToolMessage({id:'tool-result',name:'grep',tool_call_id:'call',content});
+    const result=await middleware.wrapToolCall!({toolCall:{id:'call',name:'grep',args:{}}} as never,async()=>original) as ToolMessage;
+    expect(result.content.length).toBeLessThan(3000);expect(result.tool_call_id).toBe('call');
+    const match=String(result.content).match(/[0-9a-f]{64}/);expect(match).not.toBeNull();const id=match![0];
+    let recovered='';let offset:number|null=0;
+    while(offset!==null){const page=readToolResult('归档所属会话',id,offset,6000);recovered+=page.content;offset=page.nextOffset;}
+    expect(recovered).toBe(content);expect(()=>readToolResult('其他会话',id,0,100)).toThrow();
+    let sent:unknown;
+    await middleware.wrapModelCall!({messages:[new HumanMessage('继续'),original]} as never,async(request)=>{sent=request.messages;return new AIMessage('完成');});
+    expect(JSON.stringify(sent)).not.toContain('最后内容');expect(String((sent as ToolMessage[])[1]?.content)).toContain(id);
   });
   it('异步获取群资料并缓存，不覆盖人工备注，失败保留上次成功结果', async () => {
     const store=new Store(':memory:');
@@ -157,15 +181,6 @@ describe('全局用户记忆和创建者权限', () => {
     const alert=new BalanceAlert(store,reply);await alert.report(new Error('402 Insufficient Balance'));await new BalanceAlert(store,reply).report(new Error('402 Insufficient Balance'));
     expect(sent).toEqual(['c2c:主人，我的饭饭吃光啦，呜呜……']);store.close();
   });
-  it('语义复核识别待检查遗漏，超时或返回异常时不阻止原回复', async () => {
-    const rows=[{seq:1,id:'1',sender_id:'u',sender_name:'甲',content:'请问问大家',timestamp:new Date().toISOString(),direction:'in',attachments:'[]'}];
-    const missing={invoke:async()=>({content:'{"needsRevision":true,"reason":"只表示会问，没有提出问题"}'})};
-    expect(await conversationReview(missing,rows,'u','<@bot>','我会问问')).toBe('只表示会问，没有提出问题');
-    const invalid={invoke:async()=>({content:'不是可解析的复核结果'})};
-    expect(await conversationReview(invalid,rows,'u','<@bot>','正常回复')).toBeUndefined();
-    const failed={invoke:async()=>{throw Error('服务不可用')}};
-    expect(await conversationReview(failed,rows,'u','<@bot>','正常回复')).toBeUndefined();
-  });
   it('单独 @ 时突出最近连续对话，保留发言人和上一条机器人回复', () => {
     const now=Date.now();
     const row=(seq:number,sender_id:string,sender_name:string,content:string,direction='in',age=0)=>({seq,id:`r${seq}`,sender_id,sender_name,content,timestamp:new Date(now-age).toISOString(),direction,attachments:'[]'});
@@ -189,6 +204,8 @@ describe('全局用户记忆和创建者权限', () => {
     const raw={refMsgIdx:'quoted',msgElements:[{message_type:103,msg_idx:'quoted',content:'我可以下载文件'},{message_type:0,content:'不是引用'}]};
     expect(quotedMessage(raw)).toBe('我可以下载文件');
     expect(quotedMessage({msgElements:[{message_type:0,content:'不应提取'}]})).toBeUndefined();
+    expect(quotedMessage({msgType:103,raw:{message_type:103,parallel_message:{msg_nodes:[{message_type:0,content:'离线前的引用原文'}]}}})).toBe('离线前的引用原文');
+    expect(quotedMessage({raw:{parallel_message:{msg_nodes:[{content:'不是引用'}]}}})).toBeUndefined();
   });
   it('能力清单根据前台、后台及会话范围生成', () => {
     const enabled=capabilityManifest(['start_background_task','download_file','send_media'],['download_media','deliver_media'],'group');
@@ -301,6 +318,21 @@ describe('全局用户记忆和创建者权限', () => {
 });
 
 describe('管理页面接口', () => {
+  it('对话回合与工具使用统计按实际调用展示，未知用量不伪造', async () => {
+    const store=new Store(':memory:');const now=new Date().toISOString();
+    store.db.prepare("INSERT INTO chat_turns(id,conversation_id,scope,message_id,status,received_at,started_at,finished_at,queue_ms,duration_ms) VALUES('turn','g','group','m','completed',?,?,?,5,150)").run(now,now,now);
+    store.db.prepare("INSERT INTO execution_metrics(conversation_id,scope,turn_id,phase,name,duration_ms,status,result_characters,created_at) VALUES('g','group','turn','工具','web_search',23,'success',42,?)").run(now);
+    store.db.prepare("INSERT INTO execution_metrics(conversation_id,scope,turn_id,phase,name,duration_ms,status,created_at) VALUES('g','group','turn','工具','web_search',10,'failed',?)").run(now);
+    const server=http.createServer((req,res)=>void handleAdmin(req,res,store,undefined));await new Promise<void>((resolve)=>server.listen(0,'127.0.0.1',resolve));
+    const address=server.address();if(!address||typeof address==='string')throw Error('listen');
+    try {
+      const base=`http://127.0.0.1:${address.port}`;
+      const metrics=await (await fetch(base+'/api/metrics')).json() as {turns:Array<{duration_ms:number;tool_calls:number;total_tokens:number|null}>;turnCalls:Array<{label:string;result_characters:number|null}>};
+      expect(metrics.turns[0]).toMatchObject({duration_ms:150,tool_calls:2,total_tokens:null});expect(metrics.turnCalls).toEqual(expect.arrayContaining([expect.objectContaining({label:'联网搜索',result_characters:42})]));
+      const activity=await (await fetch(base+'/api/tool-activity')).json() as {usage:Array<{name:string;calls:number;successes:number;failures:number}>};
+      expect(activity.usage[0]).toMatchObject({name:'web_search',calls:2,successes:1,failures:1});
+    } finally {await new Promise<void>((resolve)=>server.close(()=>resolve()));store.close();}
+  });
   it('聊天记录页面能按引用原文搜索并查看引用', async () => {
     const store=new Store(':memory:');
     store.record({...event('group','member','quoted'),content:'你说的是哪个',raw:{refMsgIdx:'r',msgElements:[{message_type:103,msg_idx:'r',content:'中山大学附属医院'}]}});

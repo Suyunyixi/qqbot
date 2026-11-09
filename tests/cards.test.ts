@@ -25,9 +25,39 @@ describe('QQ 原生卡片', () => {
     vi.spyOn(adapter.bot.tokenManager,'getAccessToken').mockResolvedValue('fake');vi.spyOn(adapter.bot.tokenManager,'startBackgroundRefresh').mockImplementation(()=>{});vi.spyOn(adapter.bot.tokenManager,'stopBackgroundRefresh').mockImplementation(()=>{});
     const harness=new Harness(store,{send:async()=>({})});const receive=vi.spyOn(harness,'receive').mockResolvedValue(false);adapter.listen(harness);
     await adapter.start();
-    expect(receive).toHaveBeenCalledWith(expect.objectContaining({scope:'guild',conversationId:'ch',isMention:false,content:'普通发言'}));
+    expect(receive).toHaveBeenCalledWith(expect.objectContaining({scope:'guild',conversationId:'ch',isMention:false,content:'普通发言'}),expect.any(Function),expect.any(Function));
     expect(store.db.prepare('SELECT event_type FROM qq_events').get()).toMatchObject({event_type:'GUILD_CREATE'});expect(states).toEqual([true,false]);
     harness.stop();store.close();
+  });
+  it('网关恢复序号与消息同事务提交，入库失败不越过丢失位置', async () => {
+    const store=new Store(':memory:');const errors=vi.spyOn(console,'error').mockImplementation(()=>{});let attempt=0;
+    const adapter=new QQAdapter({appId:'app',appSecret:'secret'},store,()=>{},(options)=>({start:async()=>{
+      const message=(id:string)=>({kind:'group' as const,groupOpenid:'g',senderId:'u',messageId:id,content:'群聊',timestamp:new Date().toISOString(),rawEventType:'GROUP_MESSAGE_CREATE',raw:{}});
+      attempt++;
+      if(attempt===2) {
+        expect(options.session!.load()).toEqual({sessionId:'session',lastSeq:1});
+        options.session!.save({sessionId:'session',lastSeq:2});options.onMessage(message('two'));
+        options.session!.save({sessionId:'session',lastSeq:3});options.onMessage(message('three'));
+        expect(store.recent('g',10).map((row)=>row.id)).toEqual(['one','two','three']);
+        expect(JSON.parse(store.getAppSetting('qq_gateway_session')!).lastSeq).toBe(3);
+        adapter.stop();return;
+      }
+      options.session!.save({sessionId:'session',lastSeq:1});
+      expect(store.getAppSetting('qq_gateway_session')).toBeUndefined();
+      options.onMessage(message('one'));
+      expect(store.recent('g',10)).toHaveLength(1);
+      expect(JSON.parse(store.getAppSetting('qq_gateway_session')!)).toEqual({sessionId:'session',lastSeq:1});
+      const fail=vi.spyOn(store,'setAppSetting').mockImplementationOnce(()=>{throw Error('模拟数据库故障')});
+      options.session!.save({sessionId:'session',lastSeq:2});options.onMessage(message('two'));
+      await vi.waitFor(()=>expect(errors).toHaveBeenCalled());
+      expect(store.recent('g',10).map((row)=>row.id)).toEqual(['one']);
+      expect(JSON.parse(store.getAppSetting('qq_gateway_session')!).lastSeq).toBe(1);
+      expect(options.abortSignal.aborted).toBe(true);
+      fail.mockRestore();
+    }}),1);
+    vi.spyOn(adapter.bot.tokenManager,'getAccessToken').mockResolvedValue('fake');vi.spyOn(adapter.bot.tokenManager,'startBackgroundRefresh').mockImplementation(()=>{});vi.spyOn(adapter.bot.tokenManager,'stopBackgroundRefresh').mockImplementation(()=>{});
+    const harness=new Harness(store,{send:async()=>({})});adapter.listen(harness);
+    try {await adapter.start();} finally {harness.stop();store.close();errors.mockRestore();}
   });
   it('频道消息映射到独立会话并用官方频道 API 回复', async () => {
     const store=new Store(':memory:');const adapter=new QQAdapter({appId:'test-app',appSecret:'test-secret'},store,()=>{});adapter.connected=true;

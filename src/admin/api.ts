@@ -67,10 +67,20 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
     if (req.method === 'GET' && url.pathname === '/api/metrics') {
       const totals=store.db.prepare(`SELECT phase,COUNT(*) AS calls,SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failures,
         SUM(input_tokens) AS input_tokens,SUM(output_tokens) AS output_tokens,SUM(total_tokens) AS total_tokens,
+        SUM(cache_read_tokens) AS cache_read_tokens,SUM(cache_miss_tokens) AS cache_miss_tokens,SUM(reasoning_tokens) AS reasoning_tokens,
         COUNT(total_tokens) AS usage_reported,ROUND(AVG(duration_ms)) AS average_ms
         FROM execution_metrics WHERE created_at>=strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 day') GROUP BY phase ORDER BY calls DESC`).all();
-      const recent=store.db.prepare('SELECT conversation_id,scope,task_id,phase,name,duration_ms,status,input_tokens,output_tokens,total_tokens,created_at FROM execution_metrics ORDER BY seq DESC LIMIT 100').all();
-      json(res,200,{totals,recent});return;
+      const recent=store.db.prepare('SELECT conversation_id,scope,task_id,turn_id,phase,name,duration_ms,status,input_tokens,output_tokens,total_tokens,cache_read_tokens,cache_miss_tokens,reasoning_tokens,result_characters,created_at FROM execution_metrics ORDER BY seq DESC LIMIT 100').all();
+      const turns=store.db.prepare(`SELECT t.id,t.conversation_id,t.scope,t.status,t.received_at,t.queue_ms,t.duration_ms,
+        (SELECT COUNT(*) FROM execution_metrics m WHERE m.turn_id=t.id AND m.phase<>'工具') model_calls,
+        (SELECT COUNT(*) FROM execution_metrics m WHERE m.turn_id=t.id AND m.phase='工具') tool_calls,
+        (SELECT SUM(total_tokens) FROM execution_metrics m WHERE m.turn_id=t.id) total_tokens,
+        (SELECT SUM(cache_read_tokens) FROM execution_metrics m WHERE m.turn_id=t.id) cache_read_tokens,
+        (SELECT SUM(reasoning_tokens) FROM execution_metrics m WHERE m.turn_id=t.id) reasoning_tokens
+        FROM chat_turns t ORDER BY t.received_at DESC LIMIT 30`).all();
+      const toolLabels=new Map(builtInCatalog().map((item)=>[item.name,item.label]));
+      const turnCalls=(store.db.prepare(`SELECT turn_id,phase,name,duration_ms,status,input_tokens,output_tokens,total_tokens,cache_read_tokens,cache_miss_tokens,reasoning_tokens,result_characters,created_at FROM execution_metrics WHERE turn_id IN (SELECT id FROM chat_turns ORDER BY received_at DESC LIMIT 30) ORDER BY seq DESC LIMIT 1000`).all() as Array<{name:string;phase:string}>).map((row)=>({...row,label:row.phase==='工具'?toolLabels.get(row.name) ?? row.name:row.name}));
+      json(res,200,{totals,recent,turns,turnCalls});return;
     }
     if (req.method === 'GET' && url.pathname === '/api/conversations') {
       const rows = store.db.prepare(`SELECT conversation_id,scope,COUNT(*) AS message_count,MIN(seq) AS first_seq,MAX(timestamp) AS last_activity FROM messages GROUP BY conversation_id,scope ORDER BY MAX(seq) DESC LIMIT 500`).all() as Array<{conversation_id:string;scope:string;message_count:number;first_seq:number;last_activity:string}>;
@@ -102,7 +112,8 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
     if (req.method === 'GET' && url.pathname === '/api/tool-activity') {
       const discoveries=store.db.prepare('SELECT conversation_id,scope,task_id,query,candidates,created_at,kind FROM tool_discoveries ORDER BY seq DESC LIMIT 100').all();
       const calls=store.db.prepare("SELECT conversation_id,scope,task_id,name,duration_ms,status,created_at FROM execution_metrics WHERE phase='工具' ORDER BY seq DESC LIMIT 150").all();
-      json(res,200,{discoveries,calls});return;
+      const usage=store.db.prepare(`SELECT name,COUNT(*) calls,SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) successes,SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failures,ROUND(AVG(CASE WHEN status<>'running' THEN duration_ms END)) average_ms,MAX(created_at) last_used FROM execution_metrics WHERE phase='工具' AND created_at>=strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 days') GROUP BY name ORDER BY calls DESC,name LIMIT 100`).all();
+      json(res,200,{discoveries,calls,usage});return;
     }
     if (req.method === 'GET' && url.pathname === '/api/plugins') { json(res,200,{plugins:registeredPlugins().map((item)=>({name:item.name,permissions:item.permissions}))});return; }
     if (req.method === 'POST' && url.pathname === '/api/plugins/reload') {

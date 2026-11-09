@@ -56,7 +56,7 @@ function wrap<T>(fn: (value: T) => Promise<unknown>): (value: T) => Promise<stri
 }
 export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=registeredPlugins()) {
   const config = readConfig();
-  const observeSearch=(entry:{started:number;status:'success'|'failed';usage?:{input_tokens:number;output_tokens:number;total_tokens:number}})=>recordMetric(ctx.store,{conversationId:ctx.conversationId,scope:ctx.scope,taskId:ctx.taskId,turnId:ctx.turnId},'联网搜索','DeepSeek 搜索',entry.started,entry.usage,entry.status);
+  const observeSearch=(entry:{started:number;status:'success'|'failed';usage?:{input_tokens:number;output_tokens:number;total_tokens:number;cache_read_tokens?:number;cache_miss_tokens?:number}})=>recordMetric(ctx.store,{conversationId:ctx.conversationId,scope:ctx.scope,taskId:ctx.taskId,turnId:ctx.turnId},'联网搜索','DeepSeek 搜索',entry.started,entry.usage,entry.status);
   const tools: StructuredToolInterface[] = [
     tool(wrap(async ({id,offset,limit}:{id:string;offset:number;limit:number})=>readToolResult(ctx.conversationId,id,offset,limit)),{name:'read_tool_result',description:'按工具结果标识和字符偏移读取已归档的完整大结果，使用 nextOffset 继续读取；仅访问当前会话。',schema:z.object({id:z.string().regex(/^[0-9a-f]{64}$/),offset:z.number().int().min(0).default(0),limit:z.number().int().min(1).max(12000).default(6000)})}),
     tool(wrap(async () => ({ sandbox: 'docker-container', workspace: workspaceFor(ctx.conversationId), permissions: readConfig().sandbox.permissions, toolPermissions })), { name: 'sandbox_capabilities', description: '查看当前容器沙箱、会话工作目录和工具权限；主机上的工作区由管理员映射。', schema: z.object({}) }),

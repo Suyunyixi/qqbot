@@ -3,7 +3,7 @@ import { readPublicWebpage } from './web.js';
 
 export interface SearchSource { title: string; url: string; snippet?: string; publishedAt?: string; imageUrl?: string; thumbnailUrl?: string; provider: string }
 type Range = 'any' | 'day' | 'week' | 'month' | 'year';
-type SearchObservation={started:number;status:'success'|'failed';usage?:{input_tokens:number;output_tokens:number;total_tokens:number}};
+type SearchObservation={started:number;status:'success'|'failed';usage?:{input_tokens:number;output_tokens:number;total_tokens:number;cache_read_tokens?:number;cache_miss_tokens?:number}};
 type SearchObserver=(entry:SearchObservation)=>void;
 function cleanUrl(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -28,8 +28,11 @@ async function deepseek(query: string,observe?:SearchObserver): Promise<SearchSo
   const config = readConfig(); if (!config.model.apiKey) throw new Error('搜索 provider 缺少模型密钥');
   const endpoint = `${config.tools.deepseekSearchBaseUrl.replace(/\/+$/, '')}/messages`;
   const response = await fetch(endpoint, { method:'POST', redirect:'error', headers: { 'content-type':'application/json', 'anthropic-version':'2023-06-01', 'x-api-key':config.model.apiKey, authorization:`Bearer ${config.model.apiKey}` }, body:JSON.stringify({ model:config.tools.deepseekSearchModel,max_tokens:2048,messages:[{role:'user',content:[{type:'text',text:`Perform a web search for the query: ${query}`}]}],tools:[{type:'web_search_20250305',name:'web_search',max_uses:3}],thinking:{type:'disabled'} }), signal:AbortSignal.timeout(90000) });
-  const data = await response.json() as {content?: Array<Record<string,unknown>>; error?:{message?:string}; message?:string;usage?:{input_tokens?:number;output_tokens?:number}};
-  if(typeof data.usage?.input_tokens==='number' && typeof data.usage.output_tokens==='number')usage={input_tokens:data.usage.input_tokens,output_tokens:data.usage.output_tokens,total_tokens:data.usage.input_tokens+data.usage.output_tokens};
+  const data = await response.json() as {content?: Array<Record<string,unknown>>; error?:{message?:string}; message?:string;usage?:{input_tokens?:number;output_tokens?:number;cache_read_input_tokens?:number;cache_creation_input_tokens?:number}};
+  if(typeof data.usage?.input_tokens==='number' && typeof data.usage.output_tokens==='number'){
+    const input=data.usage.input_tokens+(data.usage.cache_read_input_tokens ?? 0)+(data.usage.cache_creation_input_tokens ?? 0);
+    usage={input_tokens:input,output_tokens:data.usage.output_tokens,total_tokens:input+data.usage.output_tokens,...(typeof data.usage.cache_read_input_tokens==='number'?{cache_read_tokens:data.usage.cache_read_input_tokens,cache_miss_tokens:data.usage.input_tokens}:{})};
+  }
   if (!response.ok) throw new Error(`DeepSeek 搜索 HTTP ${response.status}: ${(data.error?.message ?? data.message ?? '请求失败').replaceAll(config.model.apiKey,'[REDACTED]')}`);
   const blocks = Array.isArray(data.content) ? data.content : [];
   const searches = blocks.filter((b) => b.type === 'web_search_tool_result');

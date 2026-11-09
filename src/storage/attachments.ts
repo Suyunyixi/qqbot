@@ -6,6 +6,7 @@ import type { InboundEvent } from '../domain/types.js';
 import { qqAttachmentResponse, qqImageDataUrl } from '../platform/qq/attachments.js';
 import type { Store } from './store.js';
 import { resolveWorkspaceFile } from './workspace.js';
+import { quotedAttachmentArchiveId, quotedMessageAttachments } from '../agent/quoted-message.js';
 
 type ImageAttachment={url:string;content_type:string};
 const sourceHash=(url:string)=>createHash('sha256').update(url).digest('hex');
@@ -23,6 +24,10 @@ export class AttachmentArchive {
     for(const row of rows) {
       try {this.enqueue({conversationId:row.conversation_id,id:row.id,attachments:JSON.parse(row.attachments)} as InboundEvent);} catch { /* 旧记录格式错误时保留原记录。 */ }
     }
+    const quotes=this.store.db.prepare(`SELECT DISTINCT m.conversation_id,m.id,m.raw FROM message_attachments a
+      JOIN messages m ON m.conversation_id=a.conversation_id AND a.message_id='qqbot-quote:' || m.id
+      WHERE a.status='pending' ORDER BY m.seq LIMIT 200`).all() as Array<{conversation_id:string;id:string;raw:string}>;
+    for(const row of quotes)this.enqueue({conversationId:row.conversation_id,id:quotedAttachmentArchiveId(row.id),attachments:quotedMessageAttachments(row.raw)} as InboundEvent);
   }
   backfillExisting(limit=200):void {
     const rows=this.store.db.prepare(`SELECT m.conversation_id,m.id,m.attachments FROM messages m
@@ -32,6 +37,12 @@ export class AttachmentArchive {
     for(const row of rows) {
       try {this.enqueue({conversationId:row.conversation_id,id:row.id,attachments:JSON.parse(row.attachments)} as InboundEvent);} catch { /* 历史数据格式异常时不修改原文。 */ }
     }
+    const quotes=this.store.db.prepare(`SELECT m.conversation_id,m.id,m.raw FROM messages m
+      WHERE m.direction='in' AND CASE WHEN json_valid(m.raw) THEN
+        (json_extract(m.raw,'$.msgType')=103 OR json_extract(m.raw,'$.raw.message_type')=103 OR json_extract(m.raw,'$.refMsgIdx') IS NOT NULL OR json_extract(m.raw,'$.raw.ref_msg_idx') IS NOT NULL) ELSE 0 END
+      AND NOT EXISTS (SELECT 1 FROM message_attachments a WHERE a.conversation_id=m.conversation_id AND a.message_id='qqbot-quote:' || m.id)
+      ORDER BY m.seq DESC LIMIT ?`).all(limit) as Array<{conversation_id:string;id:string;raw:string}>;
+    for(const row of quotes)this.enqueue({conversationId:row.conversation_id,id:quotedAttachmentArchiveId(row.id),attachments:quotedMessageAttachments(row.raw)} as InboundEvent);
   }
   retry(conversationId:string,messageId:string,index:number):void {
     const row=this.store.db.prepare('SELECT attachments FROM messages WHERE conversation_id=? AND id=?').get(conversationId,messageId) as {attachments:string}|undefined;

@@ -34,6 +34,38 @@ const { historyImageTools } = await import('../src/agent/history-images.js');
 function event(group:string,user:string,id:string): InboundEvent { return { id,conversationId:group,scope:'group',senderId:user,senderName:user,content:'消息',timestamp:new Date().toISOString(),isMention:false,attachments:[] }; }
 
 describe('全局用户记忆和创建者权限', () => {
+  it('引用中的图片独立保存，离线后仍能回看且不冒认原作者', async () => {
+    const store=new Store(':memory:');const original=globalThis.fetch;
+    const spy=vi.spyOn(globalThis,'fetch').mockImplementation((input,init)=>String(input).startsWith('https://example.qq.com/')?Promise.resolve(new Response(Buffer.from('引用图片'),{headers:{'content-type':'image/png'}})):original(input,init));
+    const harness=new Harness(store,{send:async()=>({})});
+    try {
+      const picture={url:'https://example.qq.com/quoted-test',content_type:'image/png'};
+      const msg={...event('引用群','引用者','引用消息'),raw:{msgType:103,raw:{parallel_message:{msg_nodes:[{attachments:[picture]}]}}}};
+      expect(await harness.receive(msg)).toBe(false);
+      await vi.waitFor(()=>expect(store.db.prepare('SELECT status FROM message_attachments').get()).toMatchObject({status:'saved'}));
+      spy.mockRejectedValue(new Error('网络已离线'));
+      const history=historyImageTools(store,harness.attachments,'引用群',true);
+      const list=JSON.parse(String(await history.tools[0]!.invoke({}))) as {images:Array<{source:string;senderMeaning?:string}>};
+      expect(list.images).toHaveLength(1);expect(list.images[0]).toMatchObject({source:'quote',senderMeaning:'引用者，原图片作者未知'});
+      const result=JSON.parse(String(await history.tools[1]!.invoke({messageId:'引用消息',index:0,source:'quote'}))) as {ok:boolean;senderMeaning?:string};
+      expect(result).toMatchObject({ok:true,senderMeaning:'引用者，原图片作者未知'});
+    } finally {harness.tasks.stop();spy.mockRestore();store.close();}
+  });
+  it('重启后恢复等待归档的引用图片', async () => {
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'qq-quote-resume-'));const store=new Store(':memory:');
+    const original=globalThis.fetch;const spy=vi.spyOn(globalThis,'fetch').mockImplementation((input,init)=>String(input).startsWith('https://example.qq.com/')?Promise.resolve(new Response(Buffer.from('引用图片'),{headers:{'content-type':'image/png'}})):original(input,init));
+    try {
+      const picture={url:'https://example.qq.com/resume-quote',content_type:'image/png'};
+      store.record({...event('g','u','resume-quote'),raw:{msgType:103,raw:{parallel_message:{msg_nodes:[{attachments:[picture]}]}}}});
+      store.db.prepare("INSERT INTO message_attachments(conversation_id,message_id,attachment_index,source_hash,media_type,status,updated_at) VALUES(?,?,?,?,?,'pending',?)").run('g','qqbot-quote:resume-quote',0,'resume-placeholder','image/png',new Date().toISOString());
+      // 模拟进程退出前已记录归档状态；恢复时应使用原始消息里的地址。
+      const {createHash}=await import('node:crypto');
+      store.db.prepare('UPDATE message_attachments SET source_hash=?').run(createHash('sha256').update(picture.url).digest('hex'));
+      const archive=new AttachmentArchive(store,dir);archive.resumePending();
+      await vi.waitFor(()=>expect(store.db.prepare('SELECT status FROM message_attachments').get()).toMatchObject({status:'saved'}));
+      expect(fs.readFileSync(archive.file('g','qqbot-quote:resume-quote',0)!.path).toString()).toBe('引用图片');
+    } finally {spy.mockRestore();store.close();}
+  });
   it('能回看机器人发出的本地图片，不会读取其他会话的消息', async () => {
     const store=new Store(':memory:');
     try {
@@ -80,8 +112,10 @@ describe('全局用户记忆和创建者权限', () => {
       const message=new AIMessage({content:'完成',usage_metadata:{input_tokens:100,output_tokens:20,total_tokens:120,input_token_details:{cache_read:40},output_token_details:{reasoning:7}},response_metadata:{usage:{prompt_cache_miss_tokens:60}}});
       recordMetric(store,{conversationId:'g',scope:'group',turnId:'turn-a'},'主回复','模拟模型',Date.now(),message,'success');
       recordMetric(store,{conversationId:'g',scope:'group'},'主回复','模拟模型',Date.now(),new AIMessage('完成'),'success');
+      const anthropic=new AIMessage({content:'完成',usage_metadata:{input_tokens:100,output_tokens:20,total_tokens:120,input_token_details:{cache_read:40}},response_metadata:{usage:{input_tokens:60,cache_read_input_tokens:40,output_tokens:20}}});
+      recordMetric(store,{conversationId:'g',scope:'group'},'主回复','模拟模型',Date.now(),anthropic,'success');
       const rows=store.db.prepare('SELECT turn_id,cache_read_tokens,cache_miss_tokens,reasoning_tokens FROM execution_metrics ORDER BY seq').all();
-      expect(rows).toEqual([{turn_id:'turn-a',cache_read_tokens:40,cache_miss_tokens:60,reasoning_tokens:7},{turn_id:null,cache_read_tokens:null,cache_miss_tokens:null,reasoning_tokens:null}]);
+      expect(rows).toEqual([{turn_id:'turn-a',cache_read_tokens:40,cache_miss_tokens:60,reasoning_tokens:7},{turn_id:null,cache_read_tokens:null,cache_miss_tokens:null,reasoning_tokens:null},{turn_id:null,cache_read_tokens:40,cache_miss_tokens:60,reasoning_tokens:null}]);
     } finally {store.close();}
   });
   it('大型工具结果完整归档，可分页回读且不跨会话访问', async () => {
@@ -428,6 +462,12 @@ describe('完整媒体交付', () => {
 });
 
 describe('DSH 同款结构化联网搜索', () => {
+  it('搜索用量包含缓存输入，并保留命中和未命中明细', async () => {
+    const old={base:process.env.MODEL_BASE_URL,key:process.env.MODEL_API_KEY,provider:process.env.SEARCH_PROVIDER};process.env.MODEL_BASE_URL='https://api.deepseek.com';process.env.MODEL_API_KEY='test-key';process.env.SEARCH_PROVIDER='deepseek';
+    const spy=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(JSON.stringify({usage:{input_tokens:12,cache_read_input_tokens:80,cache_creation_input_tokens:3,output_tokens:7},content:[{type:'web_search_tool_result',content:[{type:'web_search_result',url:'https://example.com/source',title:'来源'}]}]}),{status:200}));
+    try {const observe=vi.fn();await searchWeb(['查询'],{observe});expect(observe).toHaveBeenCalledWith(expect.objectContaining({status:'success',usage:{input_tokens:95,output_tokens:7,total_tokens:102,cache_read_tokens:80,cache_miss_tokens:12}}));}
+    finally {spy.mockRestore();if(old.base===undefined)delete process.env.MODEL_BASE_URL;else process.env.MODEL_BASE_URL=old.base;if(old.key===undefined)delete process.env.MODEL_API_KEY;else process.env.MODEL_API_KEY=old.key;if(old.provider===undefined)delete process.env.SEARCH_PROVIDER;else process.env.SEARCH_PROVIDER=old.provider;}
+  });
   it('只使用原生 web_search_tool_result 来源并保留发布时间', async () => {
     const old={base:process.env.MODEL_BASE_URL,key:process.env.MODEL_API_KEY,provider:process.env.SEARCH_PROVIDER};process.env.MODEL_BASE_URL='https://api.deepseek.com';process.env.MODEL_API_KEY='test-key';process.env.SEARCH_PROVIDER='deepseek';
     const spy=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(JSON.stringify({usage:{input_tokens:12,output_tokens:7},content:[{type:'text',text:'不能当作来源'},{type:'web_search_tool_result',content:[{type:'web_search_result',url:'https://example.com/source',title:'来源',page_age:'2026-11-01'}]}]}),{status:200}));

@@ -9,6 +9,7 @@ import { isCommunityScope, type InboundEvent, type Sender } from '../domain/type
 import { createHash, randomUUID } from 'node:crypto';
 import { BalanceAlert, balanceAlertText, isBalanceError } from './balance-alert.js';
 import { AttachmentArchive } from '../storage/attachments.js';
+import { quotedAttachmentArchiveId, quotedMessageAttachments } from './quoted-message.js';
 
 export function replyForChatError(error: unknown): string {
   const status=typeof error==='object' && error!==null && 'status' in error ? Number(error.status) : undefined;
@@ -48,6 +49,8 @@ export class Harness {
     catch(error){onPersistFailure?.(error);throw error;}
     if (!recorded) return false;
     this.attachments.enqueue(event);
+    const quotedAttachments=quotedMessageAttachments(event.raw);
+    if(quotedAttachments.length)this.attachments.enqueue({...event,id:quotedAttachmentArchiveId(event.id),attachments:quotedAttachments});
     // 在 Agent 图之前快速过滤，确保普通群消息只记录、不调用模型。
     if (isCommunityScope(event.scope) && !groupSettings(this.store, event.conversationId).enabled) return false;
     if (!shouldRespond(event, effectiveTrigger(this.store, event.scope, event.conversationId))) return false;

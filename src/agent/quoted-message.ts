@@ -39,8 +39,12 @@ export function quotedMessageAttachments(raw:unknown):unknown[] {
   const nodes=event.raw?.parallel_message?.msg_nodes;
   const matched=elements.filter((item:unknown)=>item && typeof item==='object' && (('message_type' in item && item.message_type===103) || ('msg_idx' in item && item.msg_idx===ref)));
   const candidates=[...(matched.length?matched:elements.slice(0,1)),...(Array.isArray(nodes)?nodes:[])];
-  return candidates.flatMap((value:unknown)=>{
+  const attachments=candidates.flatMap((value:unknown)=>{
     if(!value || typeof value!=='object' || !('attachments' in value) || !Array.isArray(value.attachments))return [];
     return value.attachments.filter((item:unknown)=>item && typeof item==='object');
   });
+  return attachments.filter((item,index)=>attachments.findIndex((other)=>JSON.stringify(other)===JSON.stringify(item))===index);
 }
+
+/** 引用附件使用独立归档键，原始消息和引用者信息保持不变。 */
+export function quotedAttachmentArchiveId(messageId:string):string { return `qqbot-quote:${messageId}`; }

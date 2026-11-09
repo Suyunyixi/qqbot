@@ -15,7 +15,7 @@ from PIL import __version__ as pillow_version
 
 MAX_REQUEST = 140 * 1024 * 1024
 MAX_FILES = 128
-MAX_FILE = 50 * 1024 * 1024
+MAX_FILE = 100 * 1024 * 1024
 MAX_OUTPUT = 100 * 1024 * 1024
 gate = threading.BoundedSemaphore(1)
 

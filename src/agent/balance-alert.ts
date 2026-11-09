@@ -46,7 +46,7 @@ export class BalanceAlert {
     state={id:state?.id ?? randomUUID(),status:'pending',lastAttempt:Date.now()};this.write(state);this.sending=true;
     try {
       const text=target.scope==='group' ? `<qqbot-at-user id="${target.external_id}" /> ${balanceAlertText}` : balanceAlertText;
-      await this.reply.send(target.conversation_id,target.scope,undefined,'text',text,undefined,`balance:${state.id}`);
+      await this.reply.send(target.conversation_id,target.scope,undefined,'text',text,undefined,`balance:${state.id}`,true);
       this.write({...state,status:'sent'});
     } catch (error) {
       const delivery=this.store.outboxState(`balance:${state.id}:0`);

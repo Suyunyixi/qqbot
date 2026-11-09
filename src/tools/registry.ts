@@ -27,6 +27,7 @@ import { toolFailure, toolResult } from './results.js';
 import { messageDetails } from '../agent/message-view.js';
 import { readToolResult } from '../agent/tool-results.js';
 import { searchBilibiliCard } from './bilibili-card.js';
+import { runJmTask } from './jm.js';
 export { workspaceFor } from '../storage/workspace.js';
 
 export interface ToolContext {
@@ -147,17 +148,17 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
       await ctx.reply.send(ctx.conversationId, ctx.scope, ctx.replyTo, 'card', payload, undefined, key);
       return { sent: true, kind: 'qq_ark_card' };
     }), { name: 'send_native_card', description: '发送 QQ 原生 ARK 卡片。单条链接 link，多条榜单 list，大图链接 cover；已获授权的其他模板可使用 custom 并提供模板 ID 和字段。链接必须是真实来源；平台拒绝时如实说明。', schema: nativeCardSchema }),
-    tool(wrap(async ({ text }: { text: string }) => {
+    tool(wrap(async ({ text, recipient, remarks }: { text: string;recipient?:string;remarks?:string }) => {
       if (ctx.background) {
         if (!ctx.taskId) throw new Error('后台进度缺少任务标识');
         await ctx.tasks.reportProgressAndWait(ctx.taskId, text);
         return { sent: false, relayedToMain: true };
       }
       const key = ctx.taskId ? `task:${ctx.taskId}:${ctx.notificationKey ?? (ctx.background ? 'worker' : 'callback')}:text:${createHash('sha256').update(text).digest('hex')}` : undefined;
-      await ctx.reply.send(ctx.conversationId, ctx.scope, ctx.replyTo, 'text', text, undefined, key);
+      const deliveredText=await ctx.reply.send(ctx.conversationId, ctx.scope, ctx.replyTo, 'text', text, undefined, key,false,{recipient,remarks});
         ctx.sentText = true;
-      return { sent: true };
-    }), { name: 'send_text', description: ctx.background ? '将需要告知群友的文字交给主 Agent 按主人格表达，等待主 Agent 处理完成；不要声称原文已直接发送。' : '立即向当前会话发送一段文字，用于必要的进度沟通或文件前后分段交流；不要重复发送。', schema: z.object({ text: z.string().min(1).max(4000) }) }),
+      return { sent: true, deliveredText };
+    }), { name: 'send_text', description: ctx.background ? '将需要告知群友的事实交给主 Agent，等待主 Agent 处理完成；不要声称原文已直接发送。' : '向独立对话 Agent 提交交接信息，表达后发送给当前会话。text 写事实和回应意图，recipient 写对象，remarks 写必要场景；不要把自造人设作为事实。', schema: z.object({ text: z.string().min(1).max(4000),recipient:z.string().max(300).optional(),remarks:z.string().max(2000).optional() }) }),
     tool(wrap(async ({ file, kind }: { file: string; kind: DeliveryKind }) => {
       let actual = safeFile(ctx.conversationId, file);
       const deliveryKey = ctx.taskId ? `task:${ctx.taskId}:${kind}:${createHash('sha256').update(actual).digest('hex')}` : undefined;
@@ -236,6 +237,10 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
     );
   } else if (ctx.taskId) {
     const id = ctx.taskId;
+    tools.push(tool(wrap(async (input:{albumId:string;password?:string}) => {
+      const task=ctx.store.task(id);if(!task)throw new Error('找不到后台任务');
+      return JSON.parse(await runJmTask({...task,payload:JSON.stringify(input)},ctx.reply,ctx.signal ?? new AbortController().signal));
+    }), {name:'download_jm_pdf',description:'按 JM 编号在隔离执行容器下载完整作品，生成加密 PDF 并向当前会话交付。省略密码时自动生成；返回真实发送状态和密码。',schema:z.object({albumId:z.string().regex(/^\d{3,12}$/),password:z.string().min(1).max(100).optional()})}));
     tools.push(tool(wrap(async (input: { source: string; format: 'original'|'mp4'|'mp3'|'m4a'|'wav'; mode: 'auto'|'file'|'video'; note?: string }) => deliverMedia(ctx, input)), { name: 'deliver_media', description: '后台任务完整交付：输入视频网址或当前会话文件，下载、按要求转换为 MP4/MP3/M4A/WAV，检查 QQ 大小上限，再发送文件或视频，必要时随后发送说明。返回 delivered 和失败原因，产物保留在工作区。', schema: z.object({ source: z.string().min(1), format: z.enum(['original','mp4','mp3','m4a','wav']).default('original'), mode: z.enum(['auto','file','video']).default('auto'), note: z.string().max(2000).optional() }) }));
     tools.push(tool(wrap(async ({ question }: { question: string }) => ({ answer: await ctx.tasks.requestInput(id, question, ctx.signal) })), { name: 'ask_user', description: '任务无法继续且确实需要群友补充信息时，向主 Agent 提问并等待答复。', schema: z.object({ question: z.string().min(1).max(1000) }) }));
     tools.push(tool(wrap(async ({ progress }: { progress: string }) => { ctx.tasks.reportProgress(id, progress); return { queued: true }; }), { name: 'report_progress', description: '向主 Agent 报告值得告知群友的重大进展，不要为每个细节刷屏。', schema: z.object({ progress: z.string().min(1).max(1000) }) }));
@@ -246,7 +251,7 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
   if (!config.tools.search) { disabled.add('web_search'); disabled.add('research_web'); disabled.add('search_images'); disabled.add('download_file'); disabled.add('read_webpage'); disabled.add('search_bilibili_card'); }
   if (!config.tools.media) { disabled.add('download_media'); disabled.add('extract_audio'); disabled.add('inspect_media'); disabled.add('deliver_media'); }
   if (!config.tools.voice) { disabled.add('speak'); disabled.add('list_voices'); disabled.add('set_voice'); }
-  if (!config.tools.python) { disabled.add('run_python_script'); disabled.add('run_shell_command'); disabled.add('render_image_card'); }
+  if (!config.tools.python) { disabled.add('run_python_script'); disabled.add('run_shell_command'); disabled.add('render_image_card'); disabled.add('download_jm_pdf'); }
   if (disabled.has('run_python_script') || disabled.has('run_shell_command')) { disabled.add('run_python_script'); disabled.add('run_shell_command'); }
   const selected = tools.filter((item) => {
     const required = toolPermissions[item.name];

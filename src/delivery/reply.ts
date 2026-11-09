@@ -22,7 +22,7 @@ export function splitText(text: string, limit: number): string[] {
 // Every delivery, including explicit tools and background callbacks, uses this queue.
 export class ReplyRuntime {
   private readonly queues = new Map<string, Promise<unknown>>();
-  constructor(private readonly store: Store, private readonly sender: Sender) {}
+  constructor(private readonly store: Store, private readonly sender: Sender, private readonly render?: (draft:{conversationId:string;scope:Scope;content:string;recipient?:string;remarks?:string;protectedValues?:string[]})=>Promise<string>) {}
 
   async retry(conversationId: string, id: string, currentReplyTo?: string): Promise<void> {
     const item = this.store.pendingOutbox(conversationId).find((candidate) => candidate.id === id);
@@ -30,17 +30,18 @@ export class ReplyRuntime {
     if (item.status === 'unknown') throw new Error('上次发送结果未知，不能自动重发，请先检查群消息');
     this.store.setOutbox(id, 'retrying');
     try {
-      await this.send(conversationId, item.scope, currentReplyTo ?? item.reply_to ?? undefined, item.kind, item.content, item.file_name ?? undefined);
+      await this.send(conversationId, item.scope, currentReplyTo ?? item.reply_to ?? undefined, item.kind, item.content, item.file_name ?? undefined, undefined, true);
       this.store.setOutbox(id, 'retried');
     } catch (error) { this.store.setOutbox(id, 'failed', undefined, error instanceof Error ? error.message : String(error)); throw error; }
   }
 
-  async send(conversationId: string, scope: Scope, replyTo: string | undefined, kind: DeliveryKind, content: string, fileName?: string, deliveryKey?: string): Promise<void> {
+  async send(conversationId: string, scope: Scope, replyTo: string | undefined, kind: DeliveryKind, content: string, fileName?: string, deliveryKey?: string, systemMessage=false, draft?:{recipient?:string;remarks?:string;protectedValues?:string[]}): Promise<string> {
     if (kind !== 'text' && kind !== 'card' && kind !== 'keyboard' && kind !== 'embed') {
       content = resolveWorkspaceFile(conversationId, content);
     }
     const previous = this.queues.get(conversationId) ?? Promise.resolve();
     const next = previous.catch(() => {}).then(async () => {
+      if (kind==='text' && this.render && !systemMessage) content=await this.render({conversationId,scope,content,...draft});
       const formatted=kind==='text' && (scope==='group' || scope==='guild') ? qqMentionMarkup(content) : content;
       const pieces = kind === 'text' ? splitMarkdown(formatted, readConfig().delivery.chunkCharacters) : [content];
       for (const [index, piece] of pieces.entries()) {
@@ -62,8 +63,9 @@ export class ReplyRuntime {
           throw error;
         }
       }
+      return formatted;
     });
     this.queues.set(conversationId, next);
-    try { await next; } finally { if (this.queues.get(conversationId) === next) this.queues.delete(conversationId); }
+    try { return await next; } finally { if (this.queues.get(conversationId) === next) this.queues.delete(conversationId); }
   }
 }

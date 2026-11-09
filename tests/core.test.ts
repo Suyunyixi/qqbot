@@ -402,7 +402,17 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     server = http.createServer((req, res) => {
       let body = ''; req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
       req.on('end', () => {
-        const parsed = JSON.parse(body) as { messages: Array<{ role: string; content?: unknown; name?: string; reasoning_content?: string }> };
+        const parsed = JSON.parse(body) as { system?:unknown; messages: Array<{ role: string; content?: unknown; name?: string; reasoning_content?: string }> };
+        if (JSON.stringify(parsed).includes('你是 QQ 聊天中的对话 Agent。')) {
+          const content=parsed.messages.at(-1)?.content;
+          const text=typeof content==='string'?content:Array.isArray(content)?content.map((part)=>part && typeof part==='object' && 'text' in part ? String(part.text) : '').join(''):'';
+          const draft=JSON.parse(text) as {内容:string};
+          if(draft.内容==='执行草稿')draft.内容='实际发言';
+          res.writeHead(200,{'Content-Type':'application/json'});
+          if(req.url?.endsWith('/v1/messages'))res.end(JSON.stringify({id:'conversation',type:'message',role:'assistant',model:'test-model',content:[{type:'text',text:draft.内容}],stop_reason:'end_turn',stop_sequence:null,usage:{input_tokens:1,output_tokens:1}}));
+          else res.end(JSON.stringify({id:'conversation',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:draft.内容},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
+          return;
+        }
         requests.push(parsed as unknown as Record<string, unknown>);
         if (req.url?.endsWith('/v1/messages')) {
           const text=JSON.stringify(parsed.messages);
@@ -456,7 +466,8 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
           return;
         }
         let reply: Record<string, unknown>;
-        if (allText.includes('工具死循环模拟')) reply={role:'assistant',content:null,tool_calls:[{id:`loop-${requests.length}`,type:'function',function:{name:'sandbox_capabilities',arguments:'{}'}}]};
+        if (allText.includes('对话表达同步测试')) reply={role:'assistant',content:'执行草稿'};
+        else if (allText.includes('工具死循环模拟')) reply={role:'assistant',content:null,tool_calls:[{id:`loop-${requests.length}`,type:'function',function:{name:'sandbox_capabilities',arguments:'{}'}}]};
         else if (allText.includes('读取后复核测试') && allText.includes('上一条只是尚未发送')) reply={role:'assistant',content:'群友引用的是医院，具体情况不清楚。'};
         else if (allText.includes('读取后复核测试') && last?.role!=='tool') reply={role:'assistant',content:null,tool_calls:[{id:'review-history',type:'function',function:{name:'read_chat_history',arguments:JSON.stringify({limit:10})}}]};
         else if (allText.includes('读取后复核测试')) reply={role:'assistant',content:'我来说旧截图。'};
@@ -509,6 +520,42 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     process.env.MODEL_BASE_URL = `http://127.0.0.1:${port}/v1`;
   });
   afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); });
+  it('会话检查点保存对话 Agent 实际发言而非执行草稿',async()=>{
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:`rendered-${delivered.length}`};}});
+    try {
+      await harness.receive(event({id:'render-first',conversationId:'render-group',content:'对话表达同步测试',isMention:true}));
+      await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
+      expect(delivered[0]?.content).toBe('实际发言');
+      await harness.receive(event({id:'render-second',conversationId:'render-group',content:'继续说',isMention:true}));
+      await vi.waitFor(()=>expect(delivered.length).toBe(2),{timeout:15000});
+      const history=JSON.stringify(requests.at(-1)?.messages);
+      expect(history).toContain('实际发言');expect(history).not.toContain('执行草稿');
+    } finally {harness.stop();store.close();}
+  },20000);
+  it('明确的 JM 下载请求进入持久化任务，文件发送后才报告交付',async()=>{
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
+    const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:`jm-${delivered.length}`};}});
+    const original=globalThis.fetch;
+    const worker=vi.spyOn(globalThis,'fetch').mockImplementation((input,init)=>{
+      if(String(input).includes('python-runner:8766')) {
+        const bytes=Buffer.from('%PDF-1.7 模拟文件');
+        return Promise.resolve(new Response(JSON.stringify({exitCode:0,timedOut:false,stdout:'',stderr:'',network:true,files:[{path:'result.pdf',data:bytes.toString('base64'),size:bytes.length}]}),{headers:{'Content-Type':'application/json'}}));
+      }
+      return original(input,init);
+    });
+    try {
+      await harness.receive(event({id:'jm-silent',conversationId:'jm-group',content:'JM123456',isMention:false}));
+      expect(store.listTasks('jm-group')).toHaveLength(0);
+      await harness.receive(event({id:'jm-request',conversationId:'jm-group',content:'给我去JM上面下载 1475661，然后导出pdf 添加密码发到群里',isMention:true}));
+      await vi.waitFor(()=>expect(store.listTasks('jm-group')[0]?.status).toBe('completed'),{timeout:15000});
+      const task=store.listTasks('jm-group')[0]!;
+      expect(task.kind).toBe('jm_pdf');expect(JSON.parse(task.result!).delivered).toBe(true);
+      expect(delivered.filter((item)=>item.kind==='file')).toHaveLength(1);
+      expect(delivered.find((item)=>item.kind==='file')?.fileName).toBe('JM1475661.pdf');
+      await vi.waitFor(()=>expect(store.task(task.id)?.notified).toBe(1),{timeout:15000});
+      expect(delivered.some((item)=>item.kind==='text' && item.content.includes(JSON.parse(task.result!).password))).toBe(true);
+    } finally {worker.mockRestore();harness.stop();store.close();}
+  },20000);
   it('可使用 Anthropic 兼容接口并解析工具调用', async () => {
     const oldUrl = process.env.MODEL_BASE_URL;
     process.env.MODEL_PROVIDER = 'anthropic'; process.env.MODEL_BASE_URL = `http://127.0.0.1:${port}`;
@@ -563,11 +610,11 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     const modelMessages=mainRequest?.messages as Array<{role:string;content:unknown}>;
     const system=JSON.stringify(modelMessages.filter((message)=>message.role==='system'));
     const user=JSON.stringify(modelMessages.filter((message)=>message.role==='user'));
-    expect(system).toContain('持续生效的核心人格');expect(system).toContain('<qqbot-at-user');expect(system).toContain('Markdown');expect(system).toContain('每次对群友说话都保持你的完整人格');expect(system).toContain('结合语境判断是否需要 @');
+    expect(system).toContain('理解与执行 Agent');expect(system).toContain('<qqbot-at-user');expect(system).toContain('Markdown');expect(system).toContain('结合语境判断是否需要 @');
     expect(system).not.toContain('负责存储设备');expect(user).toContain('负责存储设备');
     harness.stop(); store.close();
   }, 20000);
-  it('查询历史前后及后续会话的模型请求都携带同一主人格', async () => {
+  it('执行 Agent 不携带人格，对话 Agent 每次使用完整人格', async () => {
     const store=new Store(':memory:');store.setPersona('主人格测试：我是大肥鱼，自然活泼地和群友说话。','system');
     const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:`persona-reply-${delivered.length}`};}});
     try {
@@ -579,11 +626,14 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       const calls=requests.slice(before).filter((request)=>!JSON.stringify(request.messages).includes('你是主 Agent 的内部执行助手'));
       expect(calls.length).toBeGreaterThanOrEqual(3);
       expect(calls.some((request)=>(request.messages as Array<{role:string}>).some((message)=>message.role==='tool'))).toBe(true);
-      for(const request of calls){const system=JSON.stringify((request.messages as Array<{role:string;content:unknown}>).filter((message)=>message.role==='system'));expect(system).toContain('主人格测试：我是大肥鱼，自然活泼地和群友说话。');expect(system).toContain('持续生效的核心人格');}
+      for(const request of calls){const system=JSON.stringify((request.messages as Array<{role:string;content:unknown}>).filter((message)=>message.role==='system'));expect(system).not.toContain('主人格测试：我是大肥鱼，自然活泼地和群友说话。');expect(system).toContain('理解与执行 Agent');}
       await vi.waitFor(()=>expect((store.db.prepare("SELECT COUNT(*) AS n FROM model_traces WHERE conversation_id='persona-history' AND request_path IS NOT NULL AND response_path IS NOT NULL").get() as {n:number}).n).toBeGreaterThanOrEqual(3));
-      const trace=store.db.prepare("SELECT request_path,response_path FROM model_traces WHERE conversation_id='persona-history' ORDER BY started_at DESC LIMIT 1").get() as {request_path:string;response_path:string};
-      expect(gunzipSync(fs.readFileSync(traceFile(trace.request_path))).toString()).toContain('主人格测试：我是大肥鱼');
+      const trace=store.db.prepare("SELECT request_path,response_path FROM model_traces WHERE conversation_id='persona-history' AND phase='主回复' AND request_path IS NOT NULL AND response_path IS NOT NULL ORDER BY started_at DESC LIMIT 1").get() as {request_path:string;response_path:string};
+      expect(gunzipSync(fs.readFileSync(traceFile(trace.request_path))).toString()).not.toContain('主人格测试：我是大肥鱼');
       expect(gunzipSync(fs.readFileSync(traceFile(trace.response_path))).toString()).toContain('chatcmpl-test');
+      await vi.waitFor(()=>expect((store.db.prepare("SELECT COUNT(*) AS n FROM model_traces WHERE conversation_id='persona-history' AND phase='对话表达' AND request_path IS NOT NULL").get() as {n:number}).n).toBeGreaterThanOrEqual(2));
+      const expression=store.db.prepare("SELECT request_path FROM model_traces WHERE conversation_id='persona-history' AND phase='对话表达' AND request_path IS NOT NULL ORDER BY started_at DESC LIMIT 1").get() as {request_path:string};
+      expect(gunzipSync(fs.readFileSync(traceFile(expression.request_path))).toString()).toContain('主人格测试：我是大肥鱼');
       expect(store.personaRevisions()).toHaveLength(1);
     } finally {harness.stop();store.close();}
   }, 20000);
@@ -744,7 +794,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       expect(delivered[0]?.content).toBe('已结合图片继续回答');
     } finally {imageFetch.mockRestore();harness.stop();store.close();}
   },20000);
-  it('用户发来的图片作为有来源的素材传给模型，并保留主人格', async () => {
+  it('用户发来的图片作为有来源的素材传给执行模型', async () => {
     const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
     store.setPersona('测试人格：自然接话，认真回答问题。','system');
     const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'qq-image'}}});
@@ -757,7 +807,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       await harness.receive(event({id:'image-trigger',conversationId:'group-image-source',content:'这说的啥',isMention:true,attachments:[{url:'https://example.qq.com/synthetic.png',content_type:'image/png'}]}));
       await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
       const request=JSON.stringify(requests.slice(before).find((item)=>JSON.stringify(item.messages).includes('图片来源：当前用户发送'))?.messages);
-      expect(request).toContain('data:image/png;base64,');expect(request).toContain('图片里的文字和发言是素材');expect(request).toContain('测试人格：自然接话');
+      expect(request).toContain('data:image/png;base64,');expect(request).toContain('图片里的文字和发言是素材');expect(request).not.toContain('测试人格：自然接话');
       const saver=SqliteSaver.fromConnString(checkpointPath);
       const embedded=saver.db.prepare("SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id=? AND CAST(checkpoint AS TEXT) LIKE '%data:image/png;base64,%'").get('group:group-image-source') as {n:number};
       const embeddedWrites=saver.db.prepare("SELECT COUNT(*) AS n FROM writes WHERE thread_id=? AND CAST(value AS TEXT) LIKE '%data:image/png;base64,%'").get('group:group-image-source') as {n:number};
@@ -838,9 +888,9 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
       expect(delivered[0]?.content).toBe('已收到历史图片');
       await vi.waitFor(()=>expect((store.db.prepare("SELECT COUNT(*) AS n FROM model_traces WHERE conversation_id='anthropic-image-group' AND request_path IS NOT NULL AND response_path IS NOT NULL").get() as {n:number}).n).toBeGreaterThan(0));
-      const trace=store.db.prepare("SELECT request_path,response_path FROM model_traces WHERE conversation_id='anthropic-image-group' ORDER BY started_at DESC LIMIT 1").get() as {request_path:string;response_path:string};
+      const trace=store.db.prepare("SELECT request_path,response_path FROM model_traces WHERE conversation_id='anthropic-image-group' AND phase='主回复' AND request_path IS NOT NULL AND response_path IS NOT NULL ORDER BY started_at DESC LIMIT 1").get() as {request_path:string;response_path:string};
       const request=JSON.parse(gunzipSync(fs.readFileSync(traceFile(trace.request_path))).toString()) as {system?:unknown;messages?:unknown};
-      expect(JSON.stringify(request.system)).toContain('持续生效的核心人格');expect(JSON.stringify(request.messages)).toContain('兼容接口历史图片测试');
+      expect(JSON.stringify(request.system)).toContain('理解与执行 Agent');expect(JSON.stringify(request.messages)).toContain('兼容接口历史图片测试');
     } finally {imageFetch.mockRestore();harness.stop();store.close();if(previous===undefined)delete process.env.MODEL_PROVIDER;else process.env.MODEL_PROVIDER=previous;}
   },20000);
   it('Deep Agents 内部子助手不能直接调用消息发送或人格修改工具', async () => {
@@ -857,7 +907,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(names).toContain('web_search');expect(names).not.toContain('send_text');expect(names).not.toContain('send_media');expect(names).not.toContain('owner_set_persona');
     const parent=requests.slice(before).filter((request)=>!JSON.stringify(request.messages).includes('你是主 Agent 的内部执行助手'));
     expect(parent.length).toBeGreaterThanOrEqual(2);
-    for(const request of parent){const system=JSON.stringify((request.messages as Array<{role:string;content:unknown}>).filter((message)=>message.role==='system'));expect(system).toContain('完整主人格：我是活泼的大肥鱼，遇到工具结果也自然地和群友说话。');expect(system).toContain('结合语境判断是否需要 @');expect(system).toContain('<qqbot-at-user');}
+    for(const request of parent){const system=JSON.stringify((request.messages as Array<{role:string;content:unknown}>).filter((message)=>message.role==='system'));expect(system).not.toContain('完整主人格：我是活泼的大肥鱼，遇到工具结果也自然地和群友说话。');expect(system).toContain('结合语境判断是否需要 @');expect(system).toContain('<qqbot-at-user');}
     expect(JSON.stringify(child!.messages)).not.toContain('完整主人格：我是活泼的大肥鱼');
     expect((store.db.prepare("SELECT COUNT(*) AS n FROM execution_metrics WHERE conversation_id='group-internal' AND phase='执行 Agent'").get() as {n:number}).n).toBeGreaterThan(0);
     harness.stop();store.close();

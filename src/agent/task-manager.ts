@@ -13,8 +13,8 @@ export class TaskManager {
   private stopping = false;
   constructor(private readonly store: Store, private readonly runTask: TaskRunner, private readonly onResult: Callback) {}
   start(): void { this.store.recoverTasks(); this.pump(); }
-  enqueue(conversationId: string, scope: Scope, replyTo: string | undefined, instruction: string, actorId?:string): string {
-    const id = this.store.addTask(conversationId, scope, replyTo, instruction,actorId); this.pump(); return id;
+  enqueue(conversationId: string, scope: Scope, replyTo: string | undefined, instruction: string, actorId?:string, kind='agent', payload?:string): string {
+    const id = this.store.addTask(conversationId, scope, replyTo, instruction,actorId,kind,payload); this.pump(); return id;
   }
   cancel(id: string, conversationId: string): string {
     const task = this.store.task(id);
@@ -28,7 +28,7 @@ export class TaskManager {
     const task = this.store.task(id);
     if (!task) throw new Error('找不到任务');
     if (!['failed', 'interrupted', 'cancelled'].includes(task.status)) throw new Error('只有失败、中断或取消的任务可以重新执行');
-    return this.enqueue(task.conversation_id, task.scope, task.reply_to ?? undefined, task.instruction,task.actor_id ?? undefined);
+    return this.enqueue(task.conversation_id, task.scope, task.reply_to ?? undefined, task.instruction,task.actor_id ?? undefined,task.kind,task.payload ?? undefined);
   }
   update(id: string, conversationId: string, instruction: string): string {
     const task = this.store.task(id);

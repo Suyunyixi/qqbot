@@ -122,6 +122,8 @@ export class Store {
       SELECT value,'existing',NULL,updated_at FROM app_settings WHERE key='persona' AND NOT EXISTS (SELECT 1 FROM persona_revisions)`).run();
     const taskColumns=this.db.prepare('PRAGMA table_info(tasks)').all() as Array<{name:string}>;
     if(!taskColumns.some((column)=>column.name==='actor_id'))this.db.exec('ALTER TABLE tasks ADD COLUMN actor_id TEXT');
+    if(!taskColumns.some((column)=>column.name==='kind'))this.db.exec("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent'");
+    if(!taskColumns.some((column)=>column.name==='payload'))this.db.exec('ALTER TABLE tasks ADD COLUMN payload TEXT');
     const discoveryColumns=this.db.prepare('PRAGMA table_info(tool_discoveries)').all() as Array<{name:string}>;
     if(!discoveryColumns.some((column)=>column.name==='kind'))this.db.exec("ALTER TABLE tool_discoveries ADD COLUMN kind TEXT NOT NULL DEFAULT 'search'");
     const metricColumns=this.db.prepare('PRAGMA table_info(execution_metrics)').all() as Array<{name:string}>;
@@ -229,9 +231,9 @@ export class Store {
   setSummary(conversationId: string, summary: string, through: number): void {
     this.db.prepare('INSERT INTO summaries VALUES (?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET summary=excluded.summary,through_seq=excluded.through_seq,updated_at=excluded.updated_at WHERE excluded.through_seq > summaries.through_seq').run(conversationId, summary, through, new Date().toISOString());
   }
-  addTask(conversationId: string, scope: Scope, replyTo: string | undefined, instruction: string, actorId?:string): string {
+  addTask(conversationId: string, scope: Scope, replyTo: string | undefined, instruction: string, actorId?:string, kind='agent', payload?:string): string {
     const id = randomUUID(); const now = new Date().toISOString();
-    this.db.prepare("INSERT INTO tasks(id,conversation_id,scope,reply_to,instruction,status,created_at,updated_at,actor_id) VALUES (?,?,?,?,?,'queued',?,?,?)").run(id, conversationId, scope, replyTo ?? null, instruction, now, now,actorId ?? null);
+    this.db.prepare("INSERT INTO tasks(id,conversation_id,scope,reply_to,instruction,status,created_at,updated_at,actor_id,kind,payload) VALUES (?,?,?,?,?,'queued',?,?,?,?,?)").run(id, conversationId, scope, replyTo ?? null, instruction, now, now,actorId ?? null,kind,payload ?? null);
     return id;
   }
   task(id: string): TaskRow | undefined { return this.db.prepare('SELECT * FROM tasks WHERE id=?').get(id) as TaskRow | undefined; }
@@ -274,4 +276,4 @@ export class Store {
   close(): void { this.db.close(); }
 }
 export interface MessageRow { seq: number; id: string; sender_id: string; sender_name: string | null; content: string; timestamp: string; direction: string; attachments: string; raw?: string | null; is_mention?: number }
-export interface TaskRow { id: string; conversation_id: string; scope: Scope; reply_to: string | null; instruction: string; status: string; result: string | null; error: string | null; notified: number; actor_id?:string|null }
+export interface TaskRow { id: string; conversation_id: string; scope: Scope; reply_to: string | null; instruction: string; status: string; result: string | null; error: string | null; notified: number; actor_id?:string|null; kind?:string; payload?:string|null }

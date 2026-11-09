@@ -5,9 +5,9 @@ import { z } from 'zod';
 import { readConfig } from '../config/settings.js';
 import { resolveWorkspaceEntry, resolveWorkspaceFile, workspaceFor } from '../storage/workspace.js';
 
-const MAX_FILE = 50 * 1024 * 1024;
+const MAX_FILE = 100 * 1024 * 1024;
 const MAX_TOTAL = 100 * 1024 * 1024;
-const resultSchema = z.object({ exitCode: z.number().int().nullable(), timedOut: z.boolean(), stdout: z.string().max(65536), stderr: z.string().max(65536), network: z.boolean(), files: z.array(z.object({ path: z.string().min(1).max(1024), data: z.string().max(71000000), size: z.number().int().min(0).max(MAX_FILE) })).max(128) });
+const resultSchema = z.object({ exitCode: z.number().int().nullable(), timedOut: z.boolean(), stdout: z.string().max(65536), stderr: z.string().max(65536), network: z.boolean(), files: z.array(z.object({ path: z.string().min(1).max(1024), data: z.string().max(140000000), size: z.number().int().min(0).max(MAX_FILE) })).max(128) });
 type Input = { path: string; data: string };
 
 function checkedRelative(name: string): string[] {
@@ -77,6 +77,18 @@ export async function runPythonScript(conversationId: string, script: string, in
   const relativeScript = path.relative(root, actualScript).split(path.sep).join('/');
   return exportResults(conversationId, await callRunner({ script: relativeScript, files, timeoutSeconds, network:readConfig().sandbox.permissions.network, outputs }, signal));
 }
+
+/** 在执行容器中运行内置脚本，只将指定产物复制到当前会话工作区。 */
+export async function runBundledPython(conversationId: string, scriptName: string, input: unknown, output: string, signal?: AbortSignal) {
+  if (!readConfig().sandbox.permissions.network) throw new Error('下载需要在沙箱设置中启用联网权限');
+  const script = fs.readFileSync(path.resolve(process.cwd(), 'assets', scriptName));
+  const files = [{path:'job.py',data:script.toString('base64')}, {path:'job.json',data:Buffer.from(JSON.stringify(input)).toString('base64')}];
+  const result = await callRunner({script:'job.py',files,timeoutSeconds:900,network:true,outputs:[output]},signal);
+  if (result.exitCode !== 0 || result.timedOut) throw new Error(`下载或转换失败：${(result.stderr || result.stdout || (result.timedOut ? '执行超时' : '未知错误')).slice(-2000)}`);
+  const saved = exportResults(conversationId,result,`jm/${randomUUID()}/`).files;
+  if (saved.length !== 1) throw new Error('没有生成预期的 PDF 文件');
+  return saved[0]!;
+}
 export async function runShellCommand(conversationId: string, command: string, inputs: string[], timeoutSeconds: number, signal?: AbortSignal, outputs?: string[]) {
   const script = `.command-${randomUUID()}.sh`;
   const files = [{path:script,data:Buffer.from(command).toString('base64')}, ...gatherFiles(conversationId, inputs)];
@@ -107,7 +119,7 @@ export async function rasterizeSvg(conversationId: string, file: string, signal?
 }
 
 export async function checkPythonRunner(): Promise<void> {
-  const script = "import socket, subprocess\ntry:\n socket.socket()\n raise RuntimeError('network unexpectedly enabled')\nexcept PermissionError:\n pass\nassert subprocess.check_output(['/bin/sh','-c','printf subprocess-ok']).decode() == 'subprocess-ok'\nfrom PIL import Image, ImageFont\nimport cairosvg\nImageFont.truetype('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', 18)\nprint('python-sandbox-ok')\n";
+  const script = "import socket, subprocess\ntry:\n socket.socket()\n raise RuntimeError('network unexpectedly enabled')\nexcept PermissionError:\n pass\nassert subprocess.check_output(['/bin/sh','-c','printf subprocess-ok']).decode() == 'subprocess-ok'\nfrom PIL import Image, ImageFont\nfrom pypdf import PdfWriter\nimport cairosvg, jmcomic, img2pdf, cryptography\nassert callable(jmcomic.JmOption.construct)\nImageFont.truetype('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', 18)\nprint('python-sandbox-ok')\n";
   const result = await callRunner({ script: 'check.py', files: [{ path: 'check.py', data: Buffer.from(script).toString('base64') }], timeoutSeconds: 10 });
   if (result.exitCode !== 0 || !result.stdout.includes('python-sandbox-ok')) throw new Error(result.stderr || 'Python 沙箱自检失败');
 }

@@ -64,6 +64,11 @@
     "label": "下载转换并交付",
     "description": "后台下载或转换媒体，再尝试发送到会话。"
   },
+  "download_jm_pdf": {
+    "category": "文件与制作",
+    "label": "下载 JM 并发送加密 PDF",
+    "description": "按编号下载、制作加密 PDF，并向当前会话发送。"
+  },
   "run_python_script": {
     "category": "文件与制作",
     "label": "运行 Python 脚本",

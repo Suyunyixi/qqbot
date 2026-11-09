@@ -2,7 +2,7 @@ import type { SubAgent } from 'deepagents';
 
 /** Inline Deep Agents helpers may research and work on files but cannot speak or manage the bot. */
 export function internalSubagentTools<T extends { name: string }>(tools: T[]): T[] {
-  const excluded = new Set(['send_text','send_media','send_native_card','send_keyboard','send_embed','speak','deliver_media','remember_fact','start_background_task','cancel_background_task','update_background_task','retry_delivery','set_voice']);
+  const excluded = new Set(['send_text','send_media','send_native_card','send_keyboard','send_embed','speak','deliver_media','download_jm_pdf','remember_fact','start_background_task','cancel_background_task','update_background_task','retry_delivery','set_voice']);
   return tools.filter((tool) => !excluded.has(tool.name) && !tool.name.startsWith('owner_'));
 }
 

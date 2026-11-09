@@ -49,6 +49,11 @@
     "label": "检查媒体文件",
     "description": "查看媒体格式、大小、编码和时长。"
   },
+  "read_video_frames": {
+    "category": "文件与制作",
+    "label": "读取视频画面",
+    "description": "按时间抽取视频画面供视觉模型理解；不识别声音。"
+  },
   "deliver_media": {
     "category": "文件与制作",
     "label": "下载转换并交付",

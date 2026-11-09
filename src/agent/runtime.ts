@@ -27,6 +27,8 @@ import { metricsMiddleware, recordMetric } from './metrics.js';
 import { memoryBudgetReached, pendingMemoryCharacters } from './memory-budget.js';
 import { createToolDiscovery } from './tool-discovery.js';
 import { historyImageTools } from './history-images.js';
+import { videoFrameTools } from './video-frames.js';
+import { permitted, toolPermissions } from '../tools/sandbox.js';
 import { renderMessage, renderMessages } from './message-view.js';
 import { checkpointMedia } from './checkpoint-media.js';
 import { transientContext } from './transient-context.js';
@@ -113,9 +115,11 @@ export class AgentRuntime {
     const root = workspaceFor(event.conversationId);
     const live = liveContext(this.store, event.scope, event.conversationId, config, through);
     const historyImages=historyImageTools(this.store,this.attachments,event.conversationId,config.model.vision);
-    const availableTools = [...makeTools(ctx),...historyImages.tools];
+    const video=videoFrameTools(this.attachments,event.conversationId,config.model.vision);
+    const videoAllowed=config.tools.media && permitted(toolPermissions.read_video_frames!,config) && !group?.disabledTools.includes('read_video_frames');
+    const availableTools = [...makeTools(ctx),...historyImages.tools,...(videoAllowed?video.tools:[])];
     const discovery=createToolDiscovery(availableTools,this.store,{conversationId:event.conversationId,scope:event.scope,taskId:ctx.taskId},researchRequest);
-    const helperTools=internalSubagentTools(availableTools).filter((item)=>!['list_chat_images','read_chat_image'].includes(item.name));
+    const helperTools=internalSubagentTools(availableTools).filter((item)=>!['list_chat_images','read_chat_image','read_video_frames'].includes(item.name));
     const helperDiscovery=createToolDiscovery(helperTools,this.store,{conversationId:event.conversationId,scope:event.scope,taskId:ctx.taskId},researchRequest);
     let workerNames: string[] = [];
     let workerInspection = 'available';
@@ -127,7 +131,7 @@ export class AgentRuntime {
     const capabilities = {
       ...manifest,
       downloads: { ...manifest.downloads, supportedMediaSites: workerInspection === 'unknown' ? null : manifest.downloads.supportedMediaSites },
-      inputs: { qqImageVision: config.model.vision, voice: '仅使用 QQ 事件已提供的语音识别文本', otherAttachments: '普通文件和音视频不会自动下载或解析；只有取得可用文件后才能处理，处理格式不等于理解内容' },
+      inputs: { qqImageVision: config.model.vision, videoFrames:videoAllowed && config.model.vision, voice: '仅使用 QQ 事件已提供的语音识别文本；视频声音尚不能自动识别', otherAttachments: '普通文件和音视频需要读取可用文件后处理；视频抽帧仅覆盖采样时刻' },
       workerInspection,
     };
     // 后台任务可能超过近期聊天窗口；回调时保留任务期间的补充与纠正。
@@ -153,7 +157,7 @@ export class AgentRuntime {
       subagents: [{...internalSubagent([...helperTools,helperDiscovery.finder]),middleware:[...(config.sandbox.permissions.workspaceRead && config.sandbox.permissions.workspaceWrite?[largeToolResults(event.conversationId)]:[]),helperDiscovery.middleware,metricsMiddleware(this.store,{conversationId:event.conversationId,scope:event.scope,taskId:ctx.taskId,turnId:ctx.turnId},'内部子助手',config.model.name)]}],
       checkpointer: this.checkpointer,
       backend: new WorkspaceBackend(event.conversationId),
-      middleware: [...(repairSummary?[repairSummary]:[]),live.middleware, historyImages.middleware, checkpointMedia(previousMessageIds), transientContext(currentMessageId,currentContext), ...(config.sandbox.permissions.workspaceRead && config.sandbox.permissions.workspaceWrite?[largeToolResults(event.conversationId)]:[]), discovery.middleware, metricsMiddleware(this.store,{conversationId:event.conversationId,scope:event.scope,taskId:ctx.taskId,turnId:ctx.turnId},systemEvent?'任务回调':'主回复',config.model.name)],
+      middleware: [...(repairSummary?[repairSummary]:[]),live.middleware, historyImages.middleware,...(videoAllowed?[video.middleware]:[]), checkpointMedia(previousMessageIds), transientContext(currentMessageId,currentContext), ...(config.sandbox.permissions.workspaceRead && config.sandbox.permissions.workspaceWrite?[largeToolResults(event.conversationId)]:[]), discovery.middleware, metricsMiddleware(this.store,{conversationId:event.conversationId,scope:event.scope,taskId:ctx.taskId,turnId:ctx.turnId},systemEvent?'任务回调':'主回复',config.model.name)],
       permissions: filesystemRules(config),
       systemPrompt: `你是 QQ 里的长期聊天伙伴。当前发言者是${ctx.owner ? '已确认的创建者' : '普通用户或身份未确认'}。群里的 @ 和关键词只决定何时唤醒；请自己结合发言人、原文、图片、引用与前后对话理解意图，并自然地回应相关的人。
 会话记录和附件有独立保存。先结合说话人、引用和对话顺序理解当前问题指向什么；历史内容可能属于其他话题，不要仅因可见或可以读取就并入当前回答。当前上下文可能不完整：需要时主动翻阅或搜索原文，查看历史图片，不要把当前消息无附件、工作区为空或旧回复中的猜测当成事实。图片和文字都应保留作者与时间，不确定时核实或如实说明。
@@ -225,12 +229,14 @@ ${persona(this.store)}
     const config = effectiveTrigger(this.store, task.scope, task.conversation_id);
     const group = isCommunityScope(task.scope) ? groupSettings(this.store, task.conversation_id) : undefined;
     const live = liveContext(this.store, task.scope, task.conversation_id, config, task.reply_to ? this.store.eventSeq(task.conversation_id, task.reply_to) : this.store.maxSeq(task.conversation_id));
-    const availableTools = makeTools({ ...ctx, background: true, signal });
+    const video=videoFrameTools(this.attachments,task.conversation_id,config.model.vision,signal);
+    const videoAllowed=config.tools.media && permitted(toolPermissions.read_video_frames!,config) && !group?.disabledTools.includes('read_video_frames');
+    const availableTools = [...makeTools({ ...ctx, background: true, signal }),...(videoAllowed?video.tools:[])];
     const identity={conversationId:task.conversation_id,scope:task.scope,taskId:task.id};
     const discovery=createToolDiscovery(availableTools,this.store,identity,task.instruction,true);
-    const helperTools=internalSubagentTools(availableTools);
+    const helperTools=internalSubagentTools(availableTools).filter((item)=>item.name!=='read_video_frames');
     const helperDiscovery=createToolDiscovery(helperTools,this.store,identity,task.instruction,true);
-    const agent = createDeepAgent({ model: makeModel(), tools: [...availableTools,discovery.finder], subagents:[{...internalSubagent([...helperTools,helperDiscovery.finder]),middleware:[...(config.sandbox.permissions.workspaceRead && config.sandbox.permissions.workspaceWrite?[largeToolResults(task.conversation_id)]:[]),helperDiscovery.middleware,metricsMiddleware(this.store,identity,'内部子助手',config.model.name)]}], checkpointer:this.checkpointer, backend: new WorkspaceBackend(task.conversation_id), middleware: [live.middleware,checkpointMedia(new Set()),...(config.sandbox.permissions.workspaceRead && config.sandbox.permissions.workspaceWrite?[largeToolResults(task.conversation_id)]:[]),discovery.middleware,metricsMiddleware(this.store,identity,'后台任务',config.model.name)], permissions: filesystemRules(config), systemPrompt: `你是 Docker 容器沙箱中的后台任务执行者。先思考任务范围与需要验证的事实，涉及最新内容应真实联网、检查来源日期与内容，不能把搜索摘要当成结论。图片任务可搜索并下载素材，用 Python 或 shell 自由绘制，固定模板只是一种快捷方式。完成委托，使用可用工具；必要时使用 send_media 交付用户要求的文件，send_text 会把文字转给主 Agent 表达。避免刷屏和重复发送，并在结果中说明已经发送的内容。需要其他工具时用 find_tools 查找和启用；找不到可换词或查看完整目录。所有文件工具、脚本和发送工具均接受同一虚拟路径 /xxx、相对路径或当前会话真实路径 ${root}/xxx。不要修改主人格。` });
+    const agent = createDeepAgent({ model: makeModel(), tools: [...availableTools,discovery.finder], subagents:[{...internalSubagent([...helperTools,helperDiscovery.finder]),middleware:[...(config.sandbox.permissions.workspaceRead && config.sandbox.permissions.workspaceWrite?[largeToolResults(task.conversation_id)]:[]),helperDiscovery.middleware,metricsMiddleware(this.store,identity,'内部子助手',config.model.name)]}], checkpointer:this.checkpointer, backend: new WorkspaceBackend(task.conversation_id), middleware: [live.middleware,...(videoAllowed?[video.middleware]:[]),checkpointMedia(new Set()),...(config.sandbox.permissions.workspaceRead && config.sandbox.permissions.workspaceWrite?[largeToolResults(task.conversation_id)]:[]),discovery.middleware,metricsMiddleware(this.store,identity,'后台任务',config.model.name)], permissions: filesystemRules(config), systemPrompt: `你是 Docker 容器沙箱中的后台任务执行者。先思考任务范围与需要验证的事实，涉及最新内容应真实联网、检查来源日期与内容，不能把搜索摘要当成结论。图片任务可搜索并下载素材，用 Python 或 shell 自由绘制，固定模板只是一种快捷方式。完成委托，使用可用工具；必要时使用 send_media 交付用户要求的文件，send_text 会把文字转给主 Agent 表达。避免刷屏和重复发送，并在结果中说明已经发送的内容。需要其他工具时用 find_tools 查找和启用；找不到可换词或查看完整目录。所有文件工具、脚本和发送工具均接受同一虚拟路径 /xxx、相对路径或当前会话真实路径 ${root}/xxx。不要修改主人格。` });
     const configurable={thread_id:`task:${task.id}`};
     const prior=await this.checkpointer.getTuple({configurable});
     const previousMessages=(prior?.checkpoint.channel_values.messages ?? []) as unknown[];

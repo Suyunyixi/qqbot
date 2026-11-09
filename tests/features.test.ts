@@ -445,6 +445,16 @@ describe('管理页面接口', () => {
 });
 
 describe('完整媒体交付', () => {
+  it('工作区 MP4 以视频类型交付群聊', async () => {
+    const store=new Store(':memory:');const delivered:Array<{kind:string;content:string}>=[];const reply=new ReplyRuntime(store,{send:async(item)=>{delivered.push(item);return {id:'video-ok'}}});
+    const tasks=new TaskManager(store,async()=>'',async()=>{});const file=path.join(workspaceFor('video-delivery'),'测试.mp4');fs.writeFileSync(file,'video');
+    const id=store.addTask('video-delivery','group',undefined,'发视频');store.setTask(id,'running');
+    try {
+      const video=makeTools({conversationId:'video-delivery',scope:'group',store,reply,tasks,background:true,taskId:id}).find((item)=>item.name==='deliver_media')!;
+      const result=JSON.parse(String(await video.invoke({source:file,format:'original',mode:'auto'}))) as {result:{delivered:boolean;kind:string}};
+      expect(result.result).toMatchObject({delivered:true,kind:'video'});expect(delivered).toHaveLength(1);expect(delivered[0]).toMatchObject({kind:'video',content:file});
+    } finally {tasks.stop();store.close();}
+  });
   it('本地文件先发送后说明，发送失败保留文件并记录失败', async () => {
     const store=new Store(':memory:');const delivered:string[]=[];const reply=new ReplyRuntime(store,{send:async(item)=>{delivered.push(item.kind);return {id:`ok-${delivered.length}`}}});
     const tasks=new TaskManager(store,async()=>'',async(task)=>{await reply.send(task.conversation_id,task.scope,task.reply_to??undefined,'text',`主人格：${task.result}`)});

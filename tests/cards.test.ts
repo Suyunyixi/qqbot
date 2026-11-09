@@ -12,9 +12,22 @@ const { QQAdapter } = await import('../src/platform/qq/adapter.js');
 const { Harness } = await import('../src/agent/harness.js');
 const { splitMarkdown } = await import('../src/delivery/markdown.js');
 const { qqMentionMarkup } = await import('../src/platform/qq/mentions.js');
+const { workspaceFor } = await import('../src/storage/workspace.js');
 initConfig();
 
 describe('QQ 原生卡片', () => {
+  it('群视频通过 QQ SDK 的视频接口发送并要求消息回执', async () => {
+    const store=new Store(':memory:');const adapter=new QQAdapter({appId:'app',appSecret:'secret'},store,()=>{});adapter.connected=true;
+    const file=path.join(workspaceFor('video-group'),'视频.mp4');fs.writeFileSync(file,'视频样例');
+    store.record({id:'video-request',conversationId:'video-group',scope:'group',senderId:'u',content:'发视频',timestamp:new Date().toISOString(),isMention:true,attachments:[]});
+    const send=vi.spyOn(adapter.bot,'sendVideo').mockResolvedValue({message:{id:'video-sent'}} as never);
+    try {
+      await new ReplyRuntime(store,adapter).send('video-group','group','video-request','video',file,'视频.mp4');
+      expect(send).toHaveBeenCalledWith(expect.objectContaining({scope:'group',targetId:'video-group',msgId:'video-request'}),{localPath:file});
+      send.mockResolvedValue({} as never);
+      await expect(new ReplyRuntime(store,adapter).send('video-group','group','video-request','video',file,'视频.mp4')).rejects.toThrow('没有取得 QQ 消息回执');
+    } finally {store.close();}
+  });
   it('底层官方网关接收频道普通消息和平台事件', async () => {
     const store=new Store(':memory:');const states:boolean[]=[];
     const adapter=new QQAdapter({appId:'app',appSecret:'secret'},store,(state)=>states.push(state),(options)=>({start:async()=>{

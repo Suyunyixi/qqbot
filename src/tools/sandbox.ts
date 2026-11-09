@@ -7,6 +7,7 @@ export const toolPermissions: Record<string, readonly ToolPermission[]> = {
   download_media: ['network', 'process', 'workspaceWrite'],
   extract_audio: ['process', 'workspaceRead', 'workspaceWrite'],
   inspect_media: ['process', 'workspaceRead'],
+  read_video_frames: ['process', 'workspaceRead'],
   deliver_media: ['process', 'workspaceRead', 'workspaceWrite'],
   run_python_script: ['process', 'workspaceRead', 'workspaceWrite'], run_shell_command: ['process', 'workspaceRead', 'workspaceWrite'], render_image_card: ['process', 'workspaceWrite'],
   send_text: [], send_media: ['workspaceRead'], send_native_card: [], send_keyboard: [], send_embed: [],

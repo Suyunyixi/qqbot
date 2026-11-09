@@ -129,6 +129,15 @@ export class AttachmentArchive {
     }
     return qqImageDataUrl(item);
   }
+  /** 等待当前会话的附件归档完成，再返回已保存的本地文件。 */
+  async archivedFile(conversationId:string,messageId:string,index:number):Promise<{path:string;mediaType:string}> {
+    const row=this.store.db.prepare('SELECT source_hash,status,error FROM message_attachments WHERE conversation_id=? AND message_id=? AND attachment_index=?').get(conversationId,messageId,index) as {source_hash:string;status:string;error:string|null}|undefined;
+    if(!row)throw new Error('没有找到此消息的附件归档');
+    const pending=this.pending.get(row.source_hash);if(pending)await pending;
+    const file=this.file(conversationId,messageId,index);if(file)return file;
+    const state=this.store.db.prepare('SELECT status,error FROM message_attachments WHERE conversation_id=? AND message_id=? AND attachment_index=?').get(conversationId,messageId,index) as {status:string;error:string|null}|undefined;
+    throw new Error(`附件尚未保存：${state?.error ?? state?.status ?? '未知原因'}`);
+  }
   async messageImageDataUrl(conversationId:string,messageId:string,index:number):Promise<string> {
     const local=this.file(conversationId,messageId,index);
     if(local && fs.existsSync(local.path)) {

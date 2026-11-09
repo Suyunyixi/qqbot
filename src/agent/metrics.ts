@@ -2,8 +2,9 @@ import { AIMessage } from '@langchain/core/messages';
 import { createMiddleware } from 'langchain';
 import type { Store } from '../storage/store.js';
 import type { Scope } from '../domain/types.js';
+import { startToolTrace, withModelTrace } from '../models/trace.js';
 
-type Identity={conversationId:string;scope:Scope;taskId?:string;turnId?:string};
+type Identity={conversationId:string;scope:Scope;taskId?:string;turnId?:string;personaVersion?:string};
 type Usage={input_tokens?:number;output_tokens?:number;total_tokens?:number;cache_read_tokens?:number;cache_miss_tokens?:number;input_token_details?:{cache_read?:number};output_token_details?:{reasoning?:number}};
 function numberValue(...values:unknown[]):number|null {
   return values.find((value)=>typeof value==='number' && Number.isSafeInteger(value) && value>=0) as number|undefined ?? null;
@@ -38,17 +39,17 @@ export function metricsMiddleware(store:Store,identity:Identity,phase:string,mod
     name:`指标_${phase}`,
     wrapModelCall:async(request,handler)=>{
       const started=Date.now();
-      try {const result=await handler(request);recordMetric(store,identity,phase,modelName,started,result,'success');return result;}
+      try {const result=await withModelTrace({...identity,store,phase},()=>Promise.resolve(handler(request)));recordMetric(store,identity,phase,modelName,started,result,'success');return result;}
       catch(error) {recordMetric(store,identity,phase,modelName,started,undefined,'failed');throw error;}
     },
     wrapToolCall:async(request,handler)=>{
-      const started=Date.now();const metricId=startToolMetric(store,identity,request.toolCall.name);
+      const started=Date.now();const metricId=startToolMetric(store,identity,request.toolCall.name);const trace=startToolTrace({...identity,store,phase},request.toolCall.name,request.toolCall.args);
       try {
         const result=await handler(request);let failed='status' in result && result.status==='error';let partial=false;
         if('content' in result && typeof result.content==='string')try {const parsed=JSON.parse(result.content);failed ||= parsed?.ok===false;partial=parsed?.status==='partial';} catch { /* 普通文本结果无需解析。 */ }
-        finishToolMetric(store,metricId,started,failed?'failed':partial?'partial':'success','content' in result && typeof result.content==='string'?result.content.length:undefined);return result;
+        finishToolMetric(store,metricId,started,failed?'failed':partial?'partial':'success','content' in result && typeof result.content==='string'?result.content.length:undefined);trace?.finish(result,failed);return result;
       }
-      catch(error) {finishToolMetric(store,metricId,started,'failed');throw error;}
+      catch(error) {finishToolMetric(store,metricId,started,'failed');trace?.finish({error:error instanceof Error?error.message:String(error)},true);throw error;}
     },
   });
 }

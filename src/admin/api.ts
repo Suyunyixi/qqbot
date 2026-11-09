@@ -15,6 +15,8 @@ import { AttachmentArchive } from '../storage/attachments.js';
 import { builtInCatalog, describeTool, toolFeature } from '../tools/catalog.js';
 import { quotedMessage } from '../agent/quoted-message.js';
 import { quoteSearchSql } from '../storage/quote-search.js';
+import { createGunzip } from 'node:zlib';
+import { traceFile } from '../models/trace.js';
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value));
@@ -49,6 +51,16 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
   const url = new URL(req.url ?? '/', 'http://localhost');
   if (req.method !== 'GET' && (req.headers.origin !== `http://${host}` || !req.headers['content-type']?.startsWith('application/json'))) { json(res, 403, { error: '请求来源无效' }); return; }
   try {
+    if (req.method === 'GET' && url.pathname === '/api/model-trace') {
+      const traceId=z.string().uuid().parse(url.searchParams.get('id'));
+      const part=z.enum(['request','response']).parse(url.searchParams.get('part'));
+      const row=store.db.prepare('SELECT request_path,response_path FROM model_traces WHERE id=?').get(traceId) as {request_path:string|null;response_path:string|null}|undefined;
+      const name=part==='request'?row?.request_path:row?.response_path;
+      if(!name){json(res,404,{error:'调用内容尚未保存或不存在'});return;}
+      const file=traceFile(name);if(!fs.existsSync(file)){json(res,404,{error:'调用归档文件不存在'});return;}
+      res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8','X-Content-Type-Options':'nosniff','Cache-Control':'no-store'});
+      const stream=fs.createReadStream(file);const unzip=createGunzip();stream.on('error',()=>res.destroy());unzip.on('error',()=>res.destroy());stream.pipe(unzip).pipe(res);return;
+    }
     if (req.method === 'GET' && url.pathname === '/api/attachment') {
       const conversationId=id.parse(url.searchParams.get('conversationId'));
       const messageId=id.parse(url.searchParams.get('messageId'));
@@ -80,7 +92,8 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
         FROM chat_turns t ORDER BY t.received_at DESC LIMIT 30`).all();
       const toolLabels=new Map(builtInCatalog().map((item)=>[item.name,item.label]));
       const turnCalls=(store.db.prepare(`SELECT turn_id,phase,name,duration_ms,status,input_tokens,output_tokens,total_tokens,cache_read_tokens,cache_miss_tokens,reasoning_tokens,result_characters,created_at FROM execution_metrics WHERE turn_id IN (SELECT id FROM chat_turns ORDER BY received_at DESC LIMIT 30) ORDER BY seq DESC LIMIT 1000`).all() as Array<{name:string;phase:string}>).map((row)=>({...row,label:row.phase==='工具'?toolLabels.get(row.name) ?? row.name:row.name}));
-      json(res,200,{totals,recent,turns,turnCalls});return;
+      const modelTraces=store.db.prepare('SELECT id,conversation_id,turn_id,task_id,phase,tool_name,persona_version,started_at,finished_at,status,http_status,content_type,request_path IS NOT NULL AS has_request,response_path IS NOT NULL AS has_response,error FROM model_traces ORDER BY started_at DESC LIMIT 500').all();
+      json(res,200,{totals,recent,turns,turnCalls,modelTraces});return;
     }
     if (req.method === 'GET' && url.pathname === '/api/conversations') {
       const rows = store.db.prepare(`SELECT conversation_id,scope,COUNT(*) AS message_count,MIN(seq) AS first_seq,MAX(timestamp) AS last_activity FROM messages GROUP BY conversation_id,scope ORDER BY MAX(seq) DESC LIMIT 500`).all() as Array<{conversation_id:string;scope:string;message_count:number;first_seq:number;last_activity:string}>;

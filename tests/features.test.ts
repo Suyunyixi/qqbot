@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import { gunzipSync } from 'node:zlib';
 import type { InboundEvent } from '../src/domain/types.js';
 import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages';
 
@@ -21,6 +22,7 @@ const { recentActivityMarker } = await import('../src/agent/social-context.js');
 const { capabilityManifest } = await import('../src/agent/capabilities.js');
 const { quotedMessage } = await import('../src/agent/quoted-message.js');
 const { internalSubagentTools } = await import('../src/agent/subagent-policy.js');
+const { executionAgentTools } = await import('../src/agent/subagent-policy.js');
 const { conversationFocus, formatConversationFocus } = await import('../src/agent/conversation-focus.js');
 const { BalanceAlert, isBalanceError } = await import('../src/agent/balance-alert.js');
 const { AttachmentArchive } = await import('../src/storage/attachments.js');
@@ -32,9 +34,71 @@ const { metricsMiddleware, recordMetric } = await import('../src/agent/metrics.j
 const { largeToolResults, readToolResult } = await import('../src/agent/tool-results.js');
 const { historyImageTools } = await import('../src/agent/history-images.js');
 const { searchBilibiliCard } = await import('../src/tools/bilibili-card.js');
+const { withModelTrace, tracedModelFetch, traceFile } = await import('../src/models/trace.js');
+const { persona } = await import('../src/agent/runtime.js');
+const { makeModel } = await import('../src/models/factory.js');
 function event(group:string,user:string,id:string): InboundEvent { return { id,conversationId:group,scope:'group',senderId:user,senderName:user,content:'消息',timestamp:new Date().toISOString(),isMention:false,attachments:[] }; }
 
 describe('全局用户记忆和创建者权限', () => {
+  it('DeepSeek Anthropic 请求显式开启 high 思考，不改写其他服务商', () => {
+    const previous={provider:process.env.MODEL_PROVIDER,base:process.env.MODEL_BASE_URL,key:process.env.MODEL_API_KEY};
+    process.env.MODEL_PROVIDER='anthropic';process.env.MODEL_BASE_URL='https://api.deepseek.com/anthropic';process.env.MODEL_API_KEY='test';
+    try {
+      const params=(makeModel() as unknown as {invocationParams:(options:object)=>{thinking?:unknown;output_config?:unknown}}).invocationParams({});
+      expect(params.thinking).toMatchObject({type:'enabled'});expect(params.output_config).toMatchObject({effort:'high'});
+      process.env.MODEL_BASE_URL='https://example.org';
+      const other=(makeModel() as unknown as {invocationParams:(options:object)=>{thinking?:unknown;output_config?:unknown}}).invocationParams({});
+      expect(other.thinking).toBeUndefined();expect(other.output_config).toBeUndefined();
+    } finally {for(const [name,value] of Object.entries({MODEL_PROVIDER:previous.provider,MODEL_BASE_URL:previous.base,MODEL_API_KEY:previous.key}))if(value===undefined)delete process.env[name];else process.env[name]=value;}
+  });
+  it('人格缓存只在管理修改后更新，普通消息不会使其失效', () => {
+    const store=new Store(':memory:');
+    try {
+      store.setPersona('初始完整人格','admin');expect(persona(store)).toBe('初始完整人格');
+      const spy=vi.spyOn(store,'getAppSetting');store.record(event('g','u','persona-cache'));
+      expect(persona(store)).toBe('初始完整人格');expect(spy).not.toHaveBeenCalled();
+      store.setPersona('新完整人格','admin');expect(persona(store)).toBe('新完整人格');
+    } finally {store.close();}
+  });
+  it('归档实际模型请求和流式响应，并关联回合且不保存认证头', async () => {
+    const store=new Store(':memory:');const raw='event: message\ndata: {"type":"thinking"}\n\nevent: done\ndata: [DONE]\n\n';
+    const fetchSpy=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(raw,{headers:{'content-type':'text/event-stream'}}));
+    try {
+      const request=JSON.stringify({system:'完整人格',thinking:{type:'enabled'},output_config:{effort:'high'},messages:[{role:'user',content:'你好'}]});
+      const response=await withModelTrace({store,conversationId:'g',scope:'group',turnId:'turn',phase:'主回复'},()=>tracedModelFetch('https://model.example/v1/messages',{method:'POST',headers:{authorization:'secret-test'},body:request}));
+      expect(await response.text()).toBe(raw);
+      await vi.waitFor(()=>expect(store.db.prepare('SELECT status,request_path,response_path FROM model_traces').get()).toMatchObject({status:'completed',request_path:expect.any(String),response_path:expect.any(String)}));
+      const row=store.db.prepare('SELECT * FROM model_traces').get() as {turn_id:string;request_path:string;response_path:string};
+      expect(row.turn_id).toBe('turn');expect(gunzipSync(fs.readFileSync(traceFile(row.request_path))).toString()).toBe(request);
+      expect(gunzipSync(fs.readFileSync(traceFile(row.response_path))).toString()).toBe(raw);
+      expect(JSON.stringify(row)).not.toContain('secret-test');
+      const server=http.createServer((req,res)=>void handleAdmin(req,res,store,undefined));await new Promise<void>((resolve)=>server.listen(0,'127.0.0.1',resolve));
+      try {const port=(server.address() as {port:number}).port;fetchSpy.mockRestore();const saved=await fetch(`http://127.0.0.1:${port}/api/model-trace?id=${(row as unknown as {id:string}).id}&part=request`);expect(await saved.text()).toBe(request);}
+      finally {await new Promise<void>((resolve)=>server.close(()=>resolve()));}
+    } finally {fetchSpy.mockRestore();store.close();}
+  });
+  it('调用归档隐藏认证密钥和常见敏感字段，不修改返回给模型的流', async () => {
+    const store=new Store(':memory:');const secret='secret-test-123456';
+    const body=new ReadableStream<Uint8Array>({start(controller){controller.enqueue(Buffer.from('data: secret-test-'));controller.enqueue(Buffer.from('123456\n\n'));controller.close();}});
+    const fetchSpy=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(body,{headers:{'content-type':'text/event-stream'}}));
+    try {
+      const request=JSON.stringify({api_key:'embedded-secret',system:`人格 ${secret}`});
+      const response=await withModelTrace({store,conversationId:'g',scope:'group',phase:'主回复'},()=>tracedModelFetch('https://model.example',{headers:{authorization:`Bearer ${secret}`},body:request}));
+      expect(await response.text()).toContain(secret);
+      await vi.waitFor(()=>expect(store.db.prepare('SELECT status,request_path,response_path FROM model_traces').get()).toMatchObject({status:'completed',request_path:expect.any(String),response_path:expect.any(String)}));
+      const row=store.db.prepare('SELECT request_path,response_path FROM model_traces').get() as {request_path:string;response_path:string};
+      const input=gunzipSync(fs.readFileSync(traceFile(row.request_path))).toString();const output=gunzipSync(fs.readFileSync(traceFile(row.response_path))).toString();
+      expect(input).not.toContain(secret);expect(input).not.toContain('embedded-secret');expect(output).not.toContain(secret);
+      expect(input).toContain('[已隐藏');expect(output).toContain('[已隐藏密钥]');
+    } finally {fetchSpy.mockRestore();store.close();}
+  });
+  it('执行 Agent 保留前后台各自独有的工具，同名优先执行环境且不能直接发群消息', () => {
+    const foreground=[{name:'only_foreground'},{name:'shared',version:'前台'},{name:'send_text'}];
+    const background=[{name:'only_background'},{name:'shared',version:'后台'},{name:'send_media'}];
+    const tools=executionAgentTools(foreground,background);
+    expect(tools.map((item)=>item.name)).toEqual(['only_background','shared','only_foreground']);
+    expect(tools.find((item)=>item.name==='shared')).toMatchObject({version:'后台'});
+  });
   it('沙箱权限不会把关闭的语音工具误报为当前能力', async () => {
     const store=new Store(':memory:');const reply=new ReplyRuntime(store,{send:async()=>({})});const tasks=new TaskManager(store,async()=>'',async()=>{});
     try {

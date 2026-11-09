@@ -11,6 +11,7 @@ import { quoteSearchSql } from './quote-search.js';
 export class Store {
   readonly db: Database.Database;
   readonly memory: MemoryRepository;
+  personaGeneration=0;
   constructor(file = sqlitePath) {
     this.db = new Database(file);
     if (file !== ':memory:') {
@@ -46,6 +47,12 @@ export class Store {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS execution_metrics_time ON execution_metrics(created_at);
+      CREATE TABLE IF NOT EXISTS model_traces (
+        id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, scope TEXT NOT NULL, turn_id TEXT, task_id TEXT,
+        phase TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL,
+        http_status INTEGER, content_type TEXT, request_path TEXT, response_path TEXT, error TEXT, persona_version TEXT, tool_name TEXT
+      );
+      CREATE INDEX IF NOT EXISTS model_traces_turn ON model_traces(turn_id,started_at);
       CREATE TABLE IF NOT EXISTS chat_turns (
         id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, scope TEXT NOT NULL, message_id TEXT NOT NULL,
         status TEXT NOT NULL, received_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
@@ -121,6 +128,9 @@ export class Store {
     for(const [name,type] of [['turn_id','TEXT'],['cache_read_tokens','INTEGER'],['cache_miss_tokens','INTEGER'],['reasoning_tokens','INTEGER'],['result_characters','INTEGER']] as const)
       if(!metricColumns.some((column)=>column.name===name))this.db.exec(`ALTER TABLE execution_metrics ADD COLUMN ${name} ${type}`);
     this.db.exec('CREATE INDEX IF NOT EXISTS execution_metrics_turn ON execution_metrics(turn_id)');
+    const traceColumns=this.db.prepare('PRAGMA table_info(model_traces)').all() as Array<{name:string}>;
+    if(!traceColumns.some((column)=>column.name==='persona_version'))this.db.exec('ALTER TABLE model_traces ADD COLUMN persona_version TEXT');
+    if(!traceColumns.some((column)=>column.name==='tool_name'))this.db.exec('ALTER TABLE model_traces ADD COLUMN tool_name TEXT');
     this.memory = new MemoryRepository(this.db);
     this.memory.bootstrapOwner(this.qqCredentials()?.userOpenid);
   }
@@ -193,13 +203,15 @@ export class Store {
   }
   setPersona(value: string, source: 'system' | 'admin', actorId?: string): boolean {
     if (source !== 'system' && source !== 'admin') throw new Error('主人格只能通过本机管理页面修改');
-    return this.db.transaction(() => {
+    const changed=this.db.transaction(() => {
       if (this.getAppSetting('persona') === value) return false;
       const now = new Date().toISOString();
       this.db.prepare('INSERT INTO app_settings(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at').run('persona',value,now);
       this.db.prepare('INSERT INTO persona_revisions(content,source,actor_id,created_at) VALUES (?,?,?,?)').run(value,source,actorId ?? null,now);
       return true;
     })();
+    if(changed)this.personaGeneration++;
+    return changed;
   }
   personaRevisions(): Array<{seq:number;source:string;actor_id:string|null;created_at:string}> {
     return this.db.prepare('SELECT seq,source,actor_id,created_at FROM persona_revisions ORDER BY seq DESC LIMIT 50').all() as Array<{seq:number;source:string;actor_id:string|null;created_at:string}>;

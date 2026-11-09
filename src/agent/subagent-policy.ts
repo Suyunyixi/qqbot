@@ -6,6 +6,13 @@ export function internalSubagentTools<T extends { name: string }>(tools: T[]): T
   return tools.filter((tool) => !excluded.has(tool.name) && !tool.name.startsWith('owner_'));
 }
 
+/** 合并前台和后台能力，保留各自独有的工具，同名时优先使用执行环境版本。 */
+export function executionAgentTools<T extends {name:string}>(foreground:T[],background:T[]):T[] {
+  const unique=new Map<string,T>();
+  for(const item of [...background,...foreground])if(!unique.has(item.name))unique.set(item.name,item);
+  return internalSubagentTools([...unique.values()]);
+}
+
 export function internalSubagent<T extends { name: string }>(tools: T[]) {
   return {
     name: 'general-purpose',

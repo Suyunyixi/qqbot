@@ -42,7 +42,7 @@ export class Harness {
       catch(error) {void this.balanceAlert.report(error);throw error;}
     }, (task) => this.callback(task));
   }
-  start(): void { this.store.db.prepare("UPDATE execution_metrics SET status='interrupted' WHERE phase='工具' AND status='running'").run();this.store.db.prepare("UPDATE chat_turns SET status='interrupted',finished_at=? WHERE status IN ('queued','running')").run(new Date().toISOString());this.store.recoverSending(); this.tasks.start(); }
+  start(): void { this.store.db.prepare("UPDATE execution_metrics SET status='interrupted' WHERE phase='工具' AND status='running'").run();this.store.db.prepare("UPDATE model_traces SET status='interrupted',finished_at=? WHERE status='running'").run(new Date().toISOString());this.store.db.prepare("UPDATE chat_turns SET status='interrupted',finished_at=? WHERE status IN ('queued','running')").run(new Date().toISOString());this.store.recoverSending(); this.tasks.start(); }
   async receive(event: InboundEvent, commitCursor?:()=>void, onPersistFailure?:(error:unknown)=>void): Promise<boolean> {
     let recorded:boolean;
     try {recorded=commitCursor?this.store.db.transaction(()=>{const created=this.store.record(event);commitCursor();return created;})():this.store.record(event);}
@@ -84,7 +84,7 @@ export class Harness {
     return true;
   }
   private async callback(task: TaskRow): Promise<void> {
-    const instruction = task.status === 'waiting' ? '子 Agent 等待群友回答，请转述问题并说明可以@你回复；不要把等待中的任务当作完成。' : task.status === 'progress' ? '这是已安排向群友告知的进度，不代表任务已完成；结合上下文，用你的人格简短表达。' : '请根据原请求，使用 send_media 逐项真实发送要求的文件，再用你的人格回复。发送失败须说明实际情况。';
+    const instruction = task.status === 'waiting' ? '任务正在等待答复，尚未完成。' : task.status === 'progress' ? '这是任务进度，尚未完成。' : '根据原请求和实际结果处理；需要交付的文件确认发送后再说已发送，已交付的内容不要重复发送。';
     const event: InboundEvent = { id: task.reply_to ?? '', conversationId: task.conversation_id, scope: task.scope, senderId: 'system', senderName: '后台任务', timestamp: new Date().toISOString(), isMention: false, attachments: [], content: `后台任务通知（这是系统事件，不是群友发言）。任务ID：${task.id}；原任务：${task.instruction}；状态：${task.status}；结果或问题：${task.result ?? ''}；错误：${task.error ?? ''}。${instruction}` };
     const notificationKey = `${task.status}:${createHash('sha256').update(task.result ?? task.error ?? '').digest('hex').slice(0, 16)}`;
     try {await this.schedule(task.conversation_id, async () => {await this.agent.respond({ conversationId: task.conversation_id, scope: task.scope, replyTo: task.reply_to ?? undefined, store: this.store, reply: this.reply, tasks: this.tasks, background: false, taskId: task.id, notificationKey }, event, true);this.agent.compactFinishedConversation(task.scope,task.conversation_id);});}

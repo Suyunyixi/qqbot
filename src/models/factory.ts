@@ -3,15 +3,17 @@ import { isAIMessage } from '@langchain/core/messages';
 import { ChatOpenAI, ChatOpenAICompletions } from '@langchain/openai';
 import { ChatAnthropic } from '@langchain/anthropic';
 import { readConfig } from '../config/settings.js';
+import { tracedModelFetch } from './trace.js';
 
 /** Build a fresh model so edited configuration takes effect on the next run. */
 export function makeModel(): ChatOpenAI | ChatAnthropic {
   const config = readConfig();
+  const deepseek=new URL(config.model.baseUrl).hostname.toLowerCase()==='api.deepseek.com';
   if (config.model.provider === 'anthropic') {
     class ContextBoundAnthropic extends ChatAnthropic {
       override get profile() { return { ...super.profile, maxInputTokens: config.model.contextTokens }; }
     }
-    return new ContextBoundAnthropic({ model: config.model.name, apiKey: config.model.apiKey, maxTokens: 4096, maxRetries: 1, clientOptions: { baseURL: config.model.baseUrl, timeout: config.model.timeoutMs } });
+    return new ContextBoundAnthropic({ model: config.model.name, apiKey: config.model.apiKey, maxTokens: 4096, maxRetries: 1, ...(deepseek?{thinking:{type:'enabled' as const,budget_tokens:1024},outputConfig:{effort:'high' as const}}:{}), clientOptions: { baseURL: config.model.baseUrl, timeout: config.model.timeoutMs,fetch:tracedModelFetch } });
   }
 
   // DeepSeek's OpenAI-compatible thinking mode requires the original
@@ -31,18 +33,19 @@ export function makeModel(): ChatOpenAI | ChatAnthropic {
   }
   const providerFetch: typeof fetch = (input, init) => {
     const prior = reasoning.getStore();
-    if (prior && typeof init?.body === 'string') {
+    if ((prior || deepseek) && typeof init?.body === 'string') {
       const body = JSON.parse(init.body) as { tools?: unknown[]; messages?: Array<{ role?: string; reasoning_content?: string }> };
-      if (Array.isArray(body.tools) && Array.isArray(body.messages)) {
+      if (prior && Array.isArray(body.tools) && Array.isArray(body.messages)) {
         let index = 0;
         for (const message of body.messages) if (message.role === 'assistant') {
           const content = prior[index++];
           if (content !== undefined) message.reasoning_content = content;
         }
-        return globalThis.fetch(input, { ...init, body: JSON.stringify(body) });
       }
+      if(deepseek)Object.assign(body,{thinking:{type:'enabled'},reasoning_effort:'high'});
+      return tracedModelFetch(input, { ...init, body: JSON.stringify(body) });
     }
-    return globalThis.fetch(input, init);
+    return tracedModelFetch(input, init);
   };
   const fields = { model: config.model.name, apiKey: config.model.apiKey, timeout: config.model.timeoutMs, maxRetries: 1, configuration: { baseURL: config.model.baseUrl, fetch: providerFetch } };
   return new ContextBoundOpenAI({ ...fields, completions: new ReasoningCompletions(fields) });

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import { gunzipSync } from 'node:zlib';
 import { tool } from 'langchain';
 import { z } from 'zod';
 import { HumanMessage } from '@langchain/core/messages';
@@ -30,6 +31,7 @@ const { qqVoiceBuffer } = await import('../src/platform/qq/voice.js');
 const { pcmToSilk, loadSilkWasm } = await import('@tencent-connect/qqbot-nodejs/protocol');
 const { savedCredentials, QQAdapter } = await import('../src/platform/qq/adapter.js');
 const { makeModel } = await import('../src/models/factory.js');
+const { traceFile } = await import('../src/models/trace.js');
 const { filesystemRules } = await import('../src/tools/sandbox.js');
 const { liveContext, recheckBeforeReply } = await import('../src/agent/live-context.js');
 import type { DeliveryItem, InboundEvent } from '../src/domain/types.js';
@@ -561,7 +563,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     const modelMessages=mainRequest?.messages as Array<{role:string;content:unknown}>;
     const system=JSON.stringify(modelMessages.filter((message)=>message.role==='system'));
     const user=JSON.stringify(modelMessages.filter((message)=>message.role==='user'));
-    expect(system).toContain('持续生效的核心人格');expect(system).toContain('<qqbot-at-user');expect(system).toContain('Markdown');
+    expect(system).toContain('持续生效的核心人格');expect(system).toContain('<qqbot-at-user');expect(system).toContain('Markdown');expect(system).toContain('每次对群友说话都保持你的完整人格');expect(system).toContain('结合语境判断是否需要 @');
     expect(system).not.toContain('负责存储设备');expect(user).toContain('负责存储设备');
     harness.stop(); store.close();
   }, 20000);
@@ -578,6 +580,10 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       expect(calls.length).toBeGreaterThanOrEqual(3);
       expect(calls.some((request)=>(request.messages as Array<{role:string}>).some((message)=>message.role==='tool'))).toBe(true);
       for(const request of calls){const system=JSON.stringify((request.messages as Array<{role:string;content:unknown}>).filter((message)=>message.role==='system'));expect(system).toContain('主人格测试：我是大肥鱼，自然活泼地和群友说话。');expect(system).toContain('持续生效的核心人格');}
+      await vi.waitFor(()=>expect((store.db.prepare("SELECT COUNT(*) AS n FROM model_traces WHERE conversation_id='persona-history' AND request_path IS NOT NULL AND response_path IS NOT NULL").get() as {n:number}).n).toBeGreaterThanOrEqual(3));
+      const trace=store.db.prepare("SELECT request_path,response_path FROM model_traces WHERE conversation_id='persona-history' ORDER BY started_at DESC LIMIT 1").get() as {request_path:string;response_path:string};
+      expect(gunzipSync(fs.readFileSync(traceFile(trace.request_path))).toString()).toContain('主人格测试：我是大肥鱼');
+      expect(gunzipSync(fs.readFileSync(traceFile(trace.response_path))).toString()).toContain('chatcmpl-test');
       expect(store.personaRevisions()).toHaveLength(1);
     } finally {harness.stop();store.close();}
   }, 20000);
@@ -831,6 +837,10 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       await harness.receive(event({id:'anthropic-trigger',conversationId:'anthropic-image-group',content:'兼容接口历史图片测试',isMention:true}));
       await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
       expect(delivered[0]?.content).toBe('已收到历史图片');
+      await vi.waitFor(()=>expect((store.db.prepare("SELECT COUNT(*) AS n FROM model_traces WHERE conversation_id='anthropic-image-group' AND request_path IS NOT NULL AND response_path IS NOT NULL").get() as {n:number}).n).toBeGreaterThan(0));
+      const trace=store.db.prepare("SELECT request_path,response_path FROM model_traces WHERE conversation_id='anthropic-image-group' ORDER BY started_at DESC LIMIT 1").get() as {request_path:string;response_path:string};
+      const request=JSON.parse(gunzipSync(fs.readFileSync(traceFile(trace.request_path))).toString()) as {system?:unknown;messages?:unknown};
+      expect(JSON.stringify(request.system)).toContain('持续生效的核心人格');expect(JSON.stringify(request.messages)).toContain('兼容接口历史图片测试');
     } finally {imageFetch.mockRestore();harness.stop();store.close();if(previous===undefined)delete process.env.MODEL_PROVIDER;else process.env.MODEL_PROVIDER=previous;}
   },20000);
   it('Deep Agents 内部子助手不能直接调用消息发送或人格修改工具', async () => {
@@ -847,7 +857,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(names).toContain('web_search');expect(names).not.toContain('send_text');expect(names).not.toContain('send_media');expect(names).not.toContain('owner_set_persona');
     const parent=requests.slice(before).filter((request)=>!JSON.stringify(request.messages).includes('你是主 Agent 的内部执行助手'));
     expect(parent.length).toBeGreaterThanOrEqual(2);
-    for(const request of parent){const system=JSON.stringify((request.messages as Array<{role:string;content:unknown}>).filter((message)=>message.role==='system'));expect(system).toContain('完整主人格：我是活泼的大肥鱼，遇到工具结果也自然地和群友说话。');}
+    for(const request of parent){const system=JSON.stringify((request.messages as Array<{role:string;content:unknown}>).filter((message)=>message.role==='system'));expect(system).toContain('完整主人格：我是活泼的大肥鱼，遇到工具结果也自然地和群友说话。');expect(system).toContain('结合语境判断是否需要 @');expect(system).toContain('<qqbot-at-user');}
     expect(JSON.stringify(child!.messages)).not.toContain('完整主人格：我是活泼的大肥鱼');
     expect((store.db.prepare("SELECT COUNT(*) AS n FROM execution_metrics WHERE conversation_id='group-internal' AND phase='执行 Agent'").get() as {n:number}).n).toBeGreaterThan(0);
     harness.stop();store.close();
@@ -995,6 +1005,19 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(store.listTasks('group-task')[0]?.result).toContain(fileToSend);
     harness.stop(); store.close();
   }, 20000);
+  it('纯信息任务回调不会被强制要求发送文件', async () => {
+    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'info'}}});
+    try {
+      const before=requests.length;
+      const taskId=store.addTask('info-callback','group',undefined,'查今天的天气');
+      const task=store.task(taskId)!;
+      await (harness as unknown as {callback:(task:typeof task)=>Promise<void>}).callback({...task,status:'completed',result:'已找到天气资料'});
+      const call=requests.slice(before).find((request)=>JSON.stringify(request.messages).includes('后台任务通知'));
+      expect(call).toBeDefined();const text=JSON.stringify(call!.messages);
+      expect(text).toContain('已找到天气资料');expect(text).not.toContain('逐项真实发送要求的文件');
+      expect(delivered.every((item)=>item.kind==='text')).toBe(true);
+    } finally {harness.stop();store.close();}
+  },20000);
   it('后台任务使用独立检查点，恢复已完成步骤时不再次请求模型', async () => {
     const store=new Store(':memory:');const reply=new ReplyRuntime(store,{send:async()=>({id:'test'})});const tasks=new TaskManager(store,async()=>'',async()=>{});
     const id=store.addTask('checkpoint-group','group',undefined,'后台处理指定测试');const task=store.task(id)!;

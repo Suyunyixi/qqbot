@@ -22,12 +22,14 @@ const server=http.createServer((req,res)=>{
   let body='';req.on('data',(chunk)=>{body+=chunk;});req.on('end',()=>{
     const request=JSON.parse(body);requestCount++;const names=(request.tools||[]).map((item)=>item.function?.name);
     const messages=request.messages.filter((message)=>message.role==='tool');
-    gotFrames ||= JSON.stringify(request.messages).includes('data:image/jpeg;base64,');
+    const isExecutor=JSON.stringify(request.messages).includes('你是主 Agent 的内部执行助手');
+    gotFrames ||= isExecutor && JSON.stringify(request.messages).includes('data:image/jpeg;base64,');
     let message;
-    if(gotFrames)message={role:'assistant',content:'已看到测试画面'};
-    else if(names.includes('read_video_frames')){called=true;message={role:'assistant',content:null,tool_calls:[{id:'video-1',type:'function',function:{name:'read_video_frames',arguments:JSON.stringify({input:file,frameCount:2})}}]};}
-    else if(!messages.length)message={role:'assistant',content:null,tool_calls:[{id:'find-1',type:'function',function:{name:'find_tools',arguments:JSON.stringify({names:['read_video_frames']})}}]};
-    else message={role:'assistant',content:'读取视频失败'};
+    if(isExecutor && gotFrames)message={role:'assistant',content:'已看到测试画面'};
+    else if(isExecutor && names.includes('read_video_frames')){called=true;message={role:'assistant',content:null,tool_calls:[{id:'video-1',type:'function',function:{name:'read_video_frames',arguments:JSON.stringify({input:file,frameCount:2})}}]};}
+    else if(isExecutor)message={role:'assistant',content:null,tool_calls:[{id:'find-1',type:'function',function:{name:'find_tools',arguments:JSON.stringify({names:['read_video_frames']})}}]};
+    else if(!messages.length)message={role:'assistant',content:null,tool_calls:[{id:'task-1',type:'function',function:{name:'task',arguments:JSON.stringify({description:`看看视频，文件是 ${file}`,subagent_type:'general-purpose'})}}]};
+    else message={role:'assistant',content:JSON.stringify(messages).includes('已看到测试画面')?'已看到测试画面':'读取视频失败'};
     res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({id:`mock-${requestCount}`,object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message,finish_reason:message.tool_calls?'tool_calls':'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
   });
 });

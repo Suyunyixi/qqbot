@@ -465,9 +465,11 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
           else if(!toolMessages.some((message)=>message.name==='read_chat_image')) reply={role:'assistant',content:null,tool_calls:[{id:'image-read',type:'function',function:{name:'read_chat_image',arguments:JSON.stringify({messageId:'history-picture',index:0})}}]};
           else reply={role:'assistant',content:allText.includes('data:image/png;base64,')?'已读取历史图片':'没有收到图片'};
         }
-        else if (allText.includes('工具按需加载测试') && last?.role !== 'tool') reply={role:'assistant',content:null,tool_calls:[{id:'discover-test',type:'function',function:{name:'find_tools',arguments:JSON.stringify({names:['inspect_media']})}}]};
-        else if (allText.includes('工具按需加载测试') && last?.name==='find_tools') reply={role:'assistant',content:null,tool_calls:[{id:'inspect-test',type:'function',function:{name:'inspect_media',arguments:JSON.stringify({input:'/不存在的测试文件'})}}]};
-        else if (allText.includes('工具按需加载测试')) reply={role:'assistant',content:'已核实工具调用结果'};
+        else if (allText.includes('工具按需加载测试') && isInternalAgent && last?.role !== 'tool') reply={role:'assistant',content:null,tool_calls:[{id:'discover-test',type:'function',function:{name:'find_tools',arguments:JSON.stringify({names:['inspect_media']})}}]};
+        else if (allText.includes('工具按需加载测试') && isInternalAgent && last?.name==='find_tools') reply={role:'assistant',content:null,tool_calls:[{id:'inspect-test',type:'function',function:{name:'inspect_media',arguments:JSON.stringify({input:'/不存在的测试文件'})}}]};
+        else if (allText.includes('工具按需加载测试') && isInternalAgent) reply={role:'assistant',content:'已核实工具调用结果'};
+        else if (allText.includes('工具按需加载测试') && last?.role !== 'tool') reply={role:'assistant',content:null,tool_calls:[{id:'execute-test',type:'function',function:{name:'task',arguments:JSON.stringify({description:'工具按需加载测试',subagent_type:'general-purpose'})}}]};
+        else if (allText.includes('工具按需加载测试')) reply={role:'assistant',content:'主 Agent 已收到工具结果'};
         else if (allText.includes('复核期间插话测试') && allText.includes('插话发生在复核期间')) reply={role:'assistant',content:'已考虑复核期间的插话'};
         else if (allText.includes('复核期间插话测试')) reply={role:'assistant',content:'最初草稿'};
         else if (allText.includes('无关插话复核测试') && allText.includes('上一条只是尚未发送')) reply={role:'assistant',content:'7 加 5 等于 12。'};
@@ -559,7 +561,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     const modelMessages=mainRequest?.messages as Array<{role:string;content:unknown}>;
     const system=JSON.stringify(modelMessages.filter((message)=>message.role==='system'));
     const user=JSON.stringify(modelMessages.filter((message)=>message.role==='user'));
-    expect(system).toContain('持续生效的核心人格');expect(system).toContain('自行判断是否需要 @ 某人');expect(system).toContain('尽量用合适的格式突出重点');expect(system).toContain('由你根据表达需要决定');
+    expect(system).toContain('持续生效的核心人格');expect(system).toContain('<qqbot-at-user');expect(system).toContain('Markdown');
     expect(system).not.toContain('负责存储设备');expect(user).toContain('负责存储设备');
     harness.stop(); store.close();
   }, 20000);
@@ -572,10 +574,10 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       await vi.waitFor(()=>expect(delivered.length).toBe(1),{timeout:15000});
       await harness.receive(event({id:'persona-history-second',conversationId:'persona-history',content:'继续聊天',isMention:true}));
       await vi.waitFor(()=>expect(delivered.length).toBe(2),{timeout:15000});
-      const calls=requests.slice(before).filter((request)=>JSON.stringify(request.messages).includes('主人格测试：我是大肥鱼'));
+      const calls=requests.slice(before).filter((request)=>!JSON.stringify(request.messages).includes('你是主 Agent 的内部执行助手'));
       expect(calls.length).toBeGreaterThanOrEqual(3);
       expect(calls.some((request)=>(request.messages as Array<{role:string}>).some((message)=>message.role==='tool'))).toBe(true);
-      for(const request of calls){const system=JSON.stringify((request.messages as Array<{role:string;content:unknown}>).filter((message)=>message.role==='system'));expect(system).toContain('主人格测试：我是大肥鱼');expect(system).toContain('每次面向群友说话都保持以上核心人格');}
+      for(const request of calls){const system=JSON.stringify((request.messages as Array<{role:string;content:unknown}>).filter((message)=>message.role==='system'));expect(system).toContain('主人格测试：我是大肥鱼，自然活泼地和群友说话。');expect(system).toContain('持续生效的核心人格');}
       expect(store.personaRevisions()).toHaveLength(1);
     } finally {harness.stop();store.close();}
   }, 20000);
@@ -712,7 +714,9 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       const names=(item:Record<string,unknown>)=>((item.tools ?? []) as Array<{function?:{name?:string}}>).map((entry)=>entry.function?.name);
       expect(calls.length).toBeGreaterThanOrEqual(3);
       expect(names(calls[0]!)).toContain('find_tools');expect(names(calls[0]!)).not.toContain('inspect_media');
-      expect(names(calls[1]!)).toContain('inspect_media');
+      const executorCalls=calls.filter((item)=>JSON.stringify(item.messages).includes('你是主 Agent 的内部执行助手'));
+      expect(executorCalls.some((item)=>names(item).includes('inspect_media'))).toBe(true);
+      expect(calls.filter((item)=>!JSON.stringify(item.messages).includes('你是主 Agent 的内部执行助手')).every((item)=>!names(item).includes('inspect_media'))).toBe(true);
       expect(store.db.prepare("SELECT candidates FROM tool_discoveries WHERE conversation_id='dynamic-group' AND kind='search'").get()).toMatchObject({candidates:'["inspect_media"]'});
       expect((store.db.prepare("SELECT COUNT(*) AS n FROM execution_metrics WHERE conversation_id='dynamic-group' AND name='inspect_media'").get() as {n:number}).n).toBe(1);
     } finally {harness.stop();store.close();}
@@ -769,7 +773,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       const text=JSON.stringify(request?.messages);
       expect(text).toContain('data:image/png;base64,');expect(text).toContain('图片来源：聊天记录中已加载的图片');
       expect(text).toContain('苍蓝');expect(text).toContain('这他妈原价打完要20多w');
-      expect(text).toContain('不要把当前消息无附件');
+      expect(text).toContain('图片来源：聊天记录中已加载的图片');
       expect(requests.slice(before).some((item)=>JSON.stringify(item.messages).includes('群聊答复语义复核器'))).toBe(false);
     } finally {fetchImage.mockRestore();harness.stop();store.close();}
   },20000);
@@ -830,7 +834,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     } finally {imageFetch.mockRestore();harness.stop();store.close();if(previous===undefined)delete process.env.MODEL_PROVIDER;else process.env.MODEL_PROVIDER=previous;}
   },20000);
   it('Deep Agents 内部子助手不能直接调用消息发送或人格修改工具', async () => {
-    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
+    const store=new Store(':memory:');store.setPersona('完整主人格：我是活泼的大肥鱼，遇到工具结果也自然地和群友说话。','system');const delivered:DeliveryItem[]=[];
     const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:'qq-subagent'}}});
     const before=requests.length;
     await harness.receive(event({id:'internal-trigger',conversationId:'group-internal',content:'内部子助手隔离测试',isMention:true}));
@@ -841,7 +845,11 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     const tools=(child!.tools ?? []) as Array<{function?:{name?:string}}>;
     const names=tools.map((entry)=>entry.function?.name);
     expect(names).toContain('web_search');expect(names).not.toContain('send_text');expect(names).not.toContain('send_media');expect(names).not.toContain('owner_set_persona');
-    expect((store.db.prepare("SELECT COUNT(*) AS n FROM execution_metrics WHERE conversation_id='group-internal' AND phase='内部子助手'").get() as {n:number}).n).toBeGreaterThan(0);
+    const parent=requests.slice(before).filter((request)=>!JSON.stringify(request.messages).includes('你是主 Agent 的内部执行助手'));
+    expect(parent.length).toBeGreaterThanOrEqual(2);
+    for(const request of parent){const system=JSON.stringify((request.messages as Array<{role:string;content:unknown}>).filter((message)=>message.role==='system'));expect(system).toContain('完整主人格：我是活泼的大肥鱼，遇到工具结果也自然地和群友说话。');}
+    expect(JSON.stringify(child!.messages)).not.toContain('完整主人格：我是活泼的大肥鱼');
+    expect((store.db.prepare("SELECT COUNT(*) AS n FROM execution_metrics WHERE conversation_id='group-internal' AND phase='执行 Agent'").get() as {n:number}).n).toBeGreaterThan(0);
     harness.stop();store.close();
   },20000);
   it('本地对话中的最新图片不会被关键词规则强制联网', async () => {

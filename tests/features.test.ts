@@ -31,6 +31,7 @@ const { createToolDiscovery } = await import('../src/agent/tool-discovery.js');
 const { metricsMiddleware, recordMetric } = await import('../src/agent/metrics.js');
 const { largeToolResults, readToolResult } = await import('../src/agent/tool-results.js');
 const { historyImageTools } = await import('../src/agent/history-images.js');
+const { searchBilibiliCard } = await import('../src/tools/bilibili-card.js');
 function event(group:string,user:string,id:string): InboundEvent { return { id,conversationId:group,scope:'group',senderId:user,senderName:user,content:'消息',timestamp:new Date().toISOString(),isMention:false,attachments:[] }; }
 
 describe('全局用户记忆和创建者权限', () => {
@@ -456,6 +457,20 @@ describe('管理页面接口', () => {
 });
 
 describe('完整媒体交付', () => {
+  it('B 站卡片查询使用签名并只返回同名候选', async () => {
+    const original=globalThis.fetch;const calls:string[]=[];
+    const spy=vi.spyOn(globalThis,'fetch').mockImplementation((input,init)=>{
+      const url=String(input);calls.push(url);
+      if(url.includes('/x/web-interface/nav'))return Promise.resolve(new Response(JSON.stringify({data:{wbi_img:{img_url:`https://x/${'a'.repeat(32)}.png`,sub_url:`https://x/${'b'.repeat(32)}.png`}}})));
+      if(url.includes('/x/web-interface/wbi/search/type'))return Promise.resolve(new Response(JSON.stringify({code:0,data:{result:[{title:'<em>测试</em>视频',bvid:'BV1L54h6EEDV',author:'作者',pic:'https://example.com/cover'},{title:'其他视频',bvid:'BV1CF41197mv'}]}})));
+      return original(input,init);
+    });
+    try {
+      const result=await searchBilibiliCard('测试视频');
+      expect(result.candidates).toHaveLength(1);expect(result.candidates[0]).toMatchObject({bvid:'BV1L54h6EEDV',author:'作者'});expect(result.match).toContain('不等于');
+      const searches=calls.filter((url)=>url.includes('/wbi/search/type'));expect(searches).toHaveLength(3);expect(searches.every((url)=>new URL(url).searchParams.has('w_rid'))).toBe(true);
+    } finally {spy.mockRestore();}
+  });
   it('工作区 MP4 以视频类型交付群聊', async () => {
     const store=new Store(':memory:');const delivered:Array<{kind:string;content:string}>=[];const reply=new ReplyRuntime(store,{send:async(item)=>{delivered.push(item);return {id:'video-ok'}}});
     const tasks=new TaskManager(store,async()=>'',async()=>{});const file=path.join(workspaceFor('video-delivery'),'测试.mp4');fs.writeFileSync(file,'video');

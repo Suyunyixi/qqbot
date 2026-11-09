@@ -9,6 +9,11 @@
     "label": "联网搜索",
     "description": "搜索网页，获得来源链接和检索时间。"
   },
+  "search_bilibili_card": {
+    "category": "联网与资料",
+    "label": "查找 B 站分享视频",
+    "description": "根据分享卡片标题查找同名视频候选和 BV 地址。"
+  },
   "research_web": {
     "category": "联网与资料",
     "label": "搜索并核对来源",

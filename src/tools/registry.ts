@@ -26,6 +26,7 @@ import { registerPluginTool } from './catalog.js';
 import { toolFailure, toolResult } from './results.js';
 import { messageDetails } from '../agent/message-view.js';
 import { readToolResult } from '../agent/tool-results.js';
+import { searchBilibiliCard } from './bilibili-card.js';
 export { workspaceFor } from '../storage/workspace.js';
 
 export interface ToolContext {
@@ -89,6 +90,7 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
       return {members:matches,hint:'结合对话判断身份；需要 @ 时将确认的 memberId 填入 <qqbot-at-user id="成员标识" />，不要把昵称当作标识。'};
     }),{name:'find_chat_member',description:'按当前名称、历史发言名称、人工备注或成员标识查找当前群聊或频道已记录的成员；身份不清时结合聊天原文核对，不要猜测。',schema:z.object({query:z.string().trim().min(1).max(200)})}),
     tool(wrap(async ({ query, queries, range }: { query?: string; queries?: string[]; range: 'any'|'day'|'week'|'month'|'year' }) => searchWeb([...(query?[query]:[]),...(queries??[])],{range,observe:observeSearch})), { name: 'web_search', description: '真实联网搜索，支持多个关键词和时间范围，返回来源链接、发布时间、查询时间及 provider 状态；先思考检索方向，再查证原文；空结果不代表事实。', schema: z.object({ query: z.string().min(1).max(500).optional(), queries: z.array(z.string().min(1).max(500)).max(4).optional(), range: z.enum(['any','day','week','month','year']).default('any') }) }),
+    tool(wrap(async ({title}:{title:string})=>searchBilibiliCard(title,ctx.signal)),{name:'search_bilibili_card',description:'当 QQ 分享的 B 站小程序卡片只有标题和封面、没有视频地址时，用卡片完整标题检索同名视频，返回 BV 地址、作者和封面候选。标题相同不能自动证明是同一条，应结合来源核实。',schema:z.object({title:z.string().trim().min(1).max(500)})}),
     tool(wrap(async ({ queries, range }: { queries:string[]; range:'any'|'day'|'week'|'month'|'year' }) => researchWeb(queries, range,observeSearch)), { name:'research_web', description:'思考后并行检索多个方向并读取来源原文，返回搜索来源、发布时间、查询时间和读取失败；适合最新信息、版本、争议排行榜和需要交叉验证的问题。', schema:z.object({queries:z.array(z.string().min(1).max(500)).min(1).max(4),range:z.enum(['any','day','week','month','year']).default('any')}) }),
     tool(wrap(async ({ query }: { query:string }) => searchWeb([query],{category:'images',observe:observeSearch})), { name:'search_images', description:'联网搜索图片素材，返回图片地址、原网页和来源信息；用 download_file 保存需要的素材。', schema:z.object({query:z.string().min(1).max(500)}) }),
     tool(wrap(async ({ url, fileName }: {url:string;fileName?:string}) => downloadPublicFile(ctx.conversationId,url,fileName)), { name:'download_file', description:'下载公开 HTTP(S) 图片、PDF、JSON 或其他文件到当前会话工作区，返回可给脚本和发送工具使用的路径、格式、大小和来源。', schema:z.object({url:z.string().url(),fileName:z.string().max(160).optional()}) }),
@@ -241,7 +243,7 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
   const disabled = new Set<string>();
   const conversationMemoryTools=new Set(['search_chat_history','read_chat_history','read_chat_message','read_tool_result']);
   if (isCommunityScope(ctx.scope)) for (const name of groupSettings(ctx.store, ctx.conversationId).disabledTools) if(!conversationMemoryTools.has(name))disabled.add(name);
-  if (!config.tools.search) { disabled.add('web_search'); disabled.add('research_web'); disabled.add('search_images'); disabled.add('download_file'); disabled.add('read_webpage'); }
+  if (!config.tools.search) { disabled.add('web_search'); disabled.add('research_web'); disabled.add('search_images'); disabled.add('download_file'); disabled.add('read_webpage'); disabled.add('search_bilibili_card'); }
   if (!config.tools.media) { disabled.add('download_media'); disabled.add('extract_audio'); disabled.add('inspect_media'); disabled.add('deliver_media'); }
   if (!config.tools.voice) { disabled.add('speak'); disabled.add('list_voices'); disabled.add('set_voice'); }
   if (!config.tools.python) { disabled.add('run_python_script'); disabled.add('run_shell_command'); disabled.add('render_image_card'); }

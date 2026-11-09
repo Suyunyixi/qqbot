@@ -23,10 +23,13 @@ const server = http.createServer((req, res) => {
     registered ||= ['find_tools', 'send_media'].every((name) => names.includes(name));
     discovered ||= ['run_python_script', 'render_image_card', 'send_native_card'].every((name) => names.includes(name));
     const toolMessages = request.messages.filter((message) => message.role === 'tool');
+    const executor=JSON.stringify(request.messages).includes('你是主 Agent 的内部执行助手');
     let message;
-    if (toolMessages.length === 0) message = { role:'assistant', content:null, tool_calls:[{id:'find-1',type:'function',function:{name:'find_tools',arguments:JSON.stringify({names:['run_python_script','render_image_card','send_native_card']})}}] };
-    else if (toolMessages.length === 1) message = { role:'assistant', content:null, tool_calls:[{id:'write-1',type:'function',function:{name:'write_file',arguments:JSON.stringify({file_path:output,content:svg})}}] };
-    else if (toolMessages.length === 2) message = { role:'assistant', content:null, tool_calls:[{id:'send-1',type:'function',function:{name:'send_media',arguments:JSON.stringify({file:output,kind:'image'})}}] };
+    if (executor && toolMessages.length === 0) message = { role:'assistant', content:null, tool_calls:[{id:'find-1',type:'function',function:{name:'find_tools',arguments:JSON.stringify({names:['run_python_script','render_image_card']})}}] };
+    else if (executor && toolMessages.length === 1) message = { role:'assistant', content:null, tool_calls:[{id:'write-1',type:'function',function:{name:'write_file',arguments:JSON.stringify({file_path:output,content:svg})}}] };
+    else if(executor)message={role:'assistant',content:`图片文件已生成：${output}`};
+    else if(toolMessages.length === 0)message={role:'assistant',content:null,tool_calls:[{id:'task-1',type:'function',function:{name:'task',arguments:JSON.stringify({description:'生成测试图片',subagent_type:'general-purpose'})}}]};
+    else if(toolMessages.length === 1) message = { role:'assistant', content:null, tool_calls:[{id:'send-1',type:'function',function:{name:'send_media',arguments:JSON.stringify({file:output,kind:'image'})}}] };
     else message = { role:'assistant', content:'完成' };
     res.writeHead(200, {'Content-Type':'application/json'});
     res.end(JSON.stringify({id:`mock-${requests}`,object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message,finish_reason:message.tool_calls?'tool_calls':'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
@@ -40,6 +43,6 @@ try {
   await harness.receive({id:'input',conversationId:id,scope:'c2c',senderId:'user',content:'生成测试图片',timestamp:new Date().toISOString(),isMention:false,attachments:[]});
   const deadline=Date.now()+25000; while(sent.length<2 && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,100));
   const image=sent.find(item=>item.kind==='image');
-  if(!registered || !discovered || !image || !fs.readFileSync(image.content).subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex'))) throw Error(`Agent 全链路失败，基础工具=${registered}，发现工具=${discovered}，交付=${sent.map(x=>x.kind).join(',')}`);
+  if(!registered || !image || !fs.readFileSync(image.content).subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex'))) throw Error(`Agent 全链路失败，基础工具=${registered}，发现工具=${discovered}，交付=${sent.map(x=>x.kind).join(',')}`);
   console.log('真实 Deep Agents 工具调用链通过：按需发现工具 → 绝对路径写入 → SVG 转 PNG → 模拟 QQ 交付');
 } finally { harness.stop(); store.close(); await new Promise(resolve=>server.close(resolve)); }

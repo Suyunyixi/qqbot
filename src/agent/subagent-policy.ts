@@ -9,8 +9,8 @@ export function internalSubagentTools<T extends { name: string }>(tools: T[]): T
 export function internalSubagent<T extends { name: string }>(tools: T[]) {
   return {
     name: 'general-purpose',
-    description: '处理受委托的查证、分析和工作区文件任务，将结果交回主 Agent；不能直接向群里发言。',
-    systemPrompt: '你是主 Agent 的内部执行助手。完成明确的查证、分析或工作区文件任务，将事实和结果交回主 Agent。不要替主 Agent 发言，不改变人格或权限。',
+    description: '执行联网搜索、查证、下载、脚本、视频和工作区文件处理，并把结果交回对话 Agent；不能直接向群里发言。任务描述需带上必要的用户目标、链接和上下文。',
+    systemPrompt: '你是主 Agent 的内部执行助手。独立完成委托的查证、工具调用或文件处理，将事实、来源、产物路径、失败和不确定之处交回主 Agent。视频抽帧只覆盖采样画面，不代表听到了声音。不要替主 Agent 发言，不改变人格或权限。',
     // Deep Agents' declaration is narrower than the interfaces its runtime accepts.
     tools: internalSubagentTools(tools) as unknown as NonNullable<SubAgent['tools']>,
     mode: 'isolated' as const,

@@ -34,6 +34,17 @@ const { historyImageTools } = await import('../src/agent/history-images.js');
 function event(group:string,user:string,id:string): InboundEvent { return { id,conversationId:group,scope:'group',senderId:user,senderName:user,content:'消息',timestamp:new Date().toISOString(),isMention:false,attachments:[] }; }
 
 describe('全局用户记忆和创建者权限', () => {
+  it('沙箱权限不会把关闭的语音工具误报为当前能力', async () => {
+    const store=new Store(':memory:');const reply=new ReplyRuntime(store,{send:async()=>({})});const tasks=new TaskManager(store,async()=>'',async()=>{});
+    try {
+      setRuntimeConfigProvider(()=>JSON.stringify({tools:{voice:false}}));
+      const tools=makeTools({conversationId:'g',scope:'group',store,reply,tasks,background:false});
+      const capability=tools.find((item)=>item.name==='sandbox_capabilities')!;
+      const result=JSON.parse(String(await capability.invoke({}))) as {result:{toolPermissions?:unknown;hint:string}};
+      expect(result.result.toolPermissions).toBeUndefined();expect(result.result.hint).toContain('find_tools');
+      expect(tools.some((item)=>item.name==='speak')).toBe(false);
+    } finally {setRuntimeConfigProvider(undefined);tasks.stop();store.close();}
+  });
   it('引用中的图片独立保存，离线后仍能回看且不冒认原作者', async () => {
     const store=new Store(':memory:');const original=globalThis.fetch;
     const spy=vi.spyOn(globalThis,'fetch').mockImplementation((input,init)=>String(input).startsWith('https://example.qq.com/')?Promise.resolve(new Response(Buffer.from('引用图片'),{headers:{'content-type':'image/png'}})):original(input,init));

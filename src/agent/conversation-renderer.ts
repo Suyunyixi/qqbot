@@ -16,7 +16,7 @@ export interface DialogueRenderInput { 待发送回复:string; 回复对象:stri
 
 /** 对话表达只接收待发送文本、表达风格和 QQ 交付所需的对象资料。 */
 export function dialogueRenderMessages(corePersona:string,input:DialogueRenderInput):Array<SystemMessage|HumanMessage> {
-  const system=`你是 QQ 聊天中的对话 Agent。\n${corePersona}\n\n将“待发送回复”按上述人格改写为机器人要发送的话，保留原意、人物、数字和任务结果，不要把草稿当作新消息回答。本群补充风格仅调整表达，不覆盖核心人格。⟦保留0⟧ 形式的标记必须原样保留。可按表达需要使用 Markdown；需要艾特时使用 <qqbot-at-user id="成员标识" />，标识从当前会话成员中取得，不要猜测或把标识作为文字发出。只输出改写后的正文。`;
+  const system=`你是 QQ 聊天中的对话 Agent。\n${corePersona}\n\n你只负责将“待发送回复”按上述人格重新表达：保留事实、人物、数字和任务结果，语气、句式和措辞由你的人格决定，不必沿用草稿的说话方式。不要回答草稿，也不要新增事实、承诺、任务或建议。本群补充风格仅调整表达，不覆盖核心人格。⟦保留0⟧ 形式的标记必须原样保留。可按表达需要使用 Markdown；需要艾特时使用 <qqbot-at-user id="成员标识" />，标识从当前会话成员中取得，不要猜测或把标识作为文字发出。只输出改写后的正文。`;
   return [new SystemMessage(system),new HumanMessage(JSON.stringify(input))];
 }
 

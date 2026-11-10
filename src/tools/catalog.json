@@ -4,6 +4,11 @@
     "label": "查找群成员",
     "description": "按成员名称、备注或身份查找，帮助机器人正确艾特群友。"
   },
+  "query_jm": {
+    "category": "联网与资料",
+    "label": "查询 JM 作品和排行榜",
+    "description": "按关键词、作者、标签、角色搜索，查询排行榜及作品详情。需要联网和脚本执行。"
+  },
   "web_search": {
     "category": "联网与资料",
     "label": "联网搜索",

@@ -25,7 +25,9 @@ describe('对话 Agent 隔离',()=>{
       const draft=JSON.parse(String(messages[1]!.content));
       expect(draft).toMatchObject({回复对象:'当前群聊',待发送回复:'完成，密码 123456。'});
       expect(draft).not.toHaveProperty('内容');expect(draft).not.toHaveProperty('备注');
-      expect(String(messages[0]!.content)).toContain('不要把草稿当作新消息回答');
+      expect(String(messages[0]!.content)).toContain('语气、句式和措辞由你的人格决定');
+      expect(String(messages[0]!.content)).toContain('不要回答草稿');
+      expect(String(messages[0]!.content)).toContain('不要新增事实、承诺、任务或建议');
       expect(input).toContain('123456');
       return {content:'做好啦，密码是 123456。'};
     });

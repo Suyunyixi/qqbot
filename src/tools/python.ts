@@ -89,6 +89,16 @@ export async function runBundledPython(conversationId: string, scriptName: strin
   if (saved.length !== 1) throw new Error('没有生成预期的 PDF 文件');
   return saved[0]!;
 }
+
+/** 在隔离容器中执行内置联网查询，返回结构化结果，不写入会话工作区。 */
+export async function runBundledJson(scriptName: string, input: unknown, signal?: AbortSignal): Promise<unknown> {
+  if (!readConfig().sandbox.permissions.network) throw new Error('查询需要在沙箱设置中启用联网权限');
+  const script = fs.readFileSync(path.resolve(process.cwd(), 'assets', scriptName));
+  const files = [{path:'job.py',data:script.toString('base64')}, {path:'job.json',data:Buffer.from(JSON.stringify(input)).toString('base64')}];
+  const result = await callRunner({script:'job.py',files,timeoutSeconds:60,network:true,outputs:[]},signal);
+  if (result.exitCode !== 0 || result.timedOut) throw new Error(`查询失败：${(result.stderr || result.stdout || (result.timedOut ? '执行超时' : '未知错误')).slice(-2000)}`);
+  try { return JSON.parse(result.stdout); } catch { throw new Error('查询服务返回的数据格式无效'); }
+}
 export async function runShellCommand(conversationId: string, command: string, inputs: string[], timeoutSeconds: number, signal?: AbortSignal, outputs?: string[]) {
   const script = `.command-${randomUUID()}.sh`;
   const files = [{path:script,data:Buffer.from(command).toString('base64')}, ...gatherFiles(conversationId, inputs)];

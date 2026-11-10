@@ -10,6 +10,7 @@ export const toolPermissions: Record<string, readonly ToolPermission[]> = {
   read_video_frames: ['process', 'workspaceRead'],
   deliver_media: ['process', 'workspaceRead', 'workspaceWrite'],
   download_jm_pdf: ['network', 'process', 'workspaceRead', 'workspaceWrite'],
+  query_jm: ['network', 'process'],
   run_python_script: ['process', 'workspaceRead', 'workspaceWrite'], run_shell_command: ['process', 'workspaceRead', 'workspaceWrite'], render_image_card: ['process', 'workspaceWrite'],
   send_text: [], send_media: ['workspaceRead'], send_native_card: [], send_keyboard: [], send_embed: [],
   speak: ['network', 'process', 'workspaceRead', 'workspaceWrite'],

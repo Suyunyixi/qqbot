@@ -3,7 +3,16 @@ import { getMaxUploadSize, MediaFileType } from '@tencent-connect/qqbot-nodejs';
 import { readConfig } from '../config/settings.js';
 import type { TaskRow } from '../storage/store.js';
 import type { ReplyRuntime } from '../delivery/reply.js';
-import { runBundledPython } from './python.js';
+import { runBundledJson, runBundledPython } from './python.js';
+
+export type JmQuery = { action:'search'|'ranking'|'detail'; query?:string; albumId?:string; searchBy?:'site'|'work'|'author'|'tag'|'actor'; period?:'day'|'week'|'month'|'all'; order?:'latest'|'views'|'likes'|'comments'|'score'|'pictures'; page?:number };
+
+export async function queryJm(input:JmQuery, signal?:AbortSignal):Promise<unknown> {
+  if (!readConfig().tools.python || !readConfig().sandbox.permissions.process) throw new Error('JM 查询需要启用脚本执行');
+  if (input.action==='search' && !input.query?.trim()) throw new Error('请提供搜索词');
+  if (input.action==='detail' && !/^\d{3,12}$/.test(input.albumId ?? '')) throw new Error('请提供有效的 JM 编号');
+  return runBundledJson('jm_query.py',input,signal);
+}
 
 export async function runJmTask(task:TaskRow, reply:ReplyRuntime, signal:AbortSignal):Promise<string> {
   const config=readConfig();

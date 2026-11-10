@@ -22,6 +22,7 @@ describe('对话 Agent 隔离',()=>{
       expect(input).toContain('测试人格：活泼自然');
       expect(input).not.toContain('不应送入表达 Agent 的历史');
       expect(input).toContain('回复对象');expect(input).toContain('内容');expect(input).toContain('备注');
+      expect(input).toContain('不是用户对你说的话');expect(input).toContain('“我”指机器人本人');expect(input).toContain('“你”指回复对象');
       expect(input).toContain('123456');
       return {content:'做好啦，密码是 123456。'};
     });

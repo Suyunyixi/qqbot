@@ -24,8 +24,9 @@ export function dialogueInput(raw:string):{content:string;recipient:string;remar
     const value=request.messages?.filter((message)=>message.role==='user').at(-1)?.content;
     const text=typeof value==='string'?value:Array.isArray(value)?value.filter((item)=>item && typeof item==='object' && item.type==='text').map((item)=>item.text).join(''):'';
     const parsed=JSON.parse(text) as Record<string,unknown>;
-    if(typeof parsed['内容']!=='string')return undefined;
-    return {content:parsed['内容'],recipient:typeof parsed['回复对象']==='string'?parsed['回复对象']:'',remarks:typeof parsed['备注']==='string'?parsed['备注']:''};
+    const content=parsed['待发送回复'] ?? parsed['内容'];
+    if(typeof content!=='string')return undefined;
+    return {content,recipient:typeof parsed['回复对象']==='string'?parsed['回复对象']:'',remarks:typeof parsed['备注']==='string'?parsed['备注']:''};
   } catch {return undefined;}
 }
 

@@ -407,11 +407,11 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
         if (JSON.stringify(parsed).includes('你是 QQ 聊天中的对话 Agent。')) {
           const content=parsed.messages.at(-1)?.content;
           const text=typeof content==='string'?content:Array.isArray(content)?content.map((part)=>part && typeof part==='object' && 'text' in part ? String(part.text) : '').join(''):'';
-          const draft=JSON.parse(text) as {内容:string};
-          if(draft.内容==='执行草稿')draft.内容='实际发言';
+          const draft=JSON.parse(text) as {待发送回复:string};
+          if(draft.待发送回复==='执行草稿')draft.待发送回复='实际发言';
           res.writeHead(200,{'Content-Type':'application/json'});
-          if(req.url?.endsWith('/v1/messages'))res.end(JSON.stringify({id:'conversation',type:'message',role:'assistant',model:'test-model',content:[{type:'text',text:draft.内容}],stop_reason:'end_turn',stop_sequence:null,usage:{input_tokens:1,output_tokens:1}}));
-          else res.end(JSON.stringify({id:'conversation',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:draft.内容},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
+          if(req.url?.endsWith('/v1/messages'))res.end(JSON.stringify({id:'conversation',type:'message',role:'assistant',model:'test-model',content:[{type:'text',text:draft.待发送回复}],stop_reason:'end_turn',stop_sequence:null,usage:{input_tokens:1,output_tokens:1}}));
+          else res.end(JSON.stringify({id:'conversation',object:'chat.completion',created:1,model:'test-model',choices:[{index:0,message:{role:'assistant',content:draft.待发送回复},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
           return;
         }
         requests.push(parsed as unknown as Record<string, unknown>);

@@ -16,13 +16,16 @@ describe('对话 Agent 隔离',()=>{
     const store=new Store(':memory:');store.setAppSetting('persona','测试人格：活泼自然');
     store.record({id:'m1',conversationId:'g',scope:'group',senderId:'u',content:'不应送入表达 Agent 的历史',timestamp:new Date().toISOString(),isMention:true,attachments:[]});
     let input='';
-    const result=await renderConversationReply(store,{conversationId:'g',scope:'group',content:'完成，密码 123456。'},async(messages)=>{
+    const result=await renderConversationReply(store,{conversationId:'g',scope:'group',content:'完成，密码 123456。',remarks:'不应进入表达阶段的备注'},async(messages)=>{
       expect(messages).toHaveLength(2);
       input=JSON.stringify(messages.map((item)=>item.content));
       expect(input).toContain('测试人格：活泼自然');
       expect(input).not.toContain('不应送入表达 Agent 的历史');
-      expect(input).toContain('回复对象');expect(input).toContain('内容');expect(input).toContain('备注');
-      expect(input).toContain('不是用户对你说的话');expect(input).toContain('“我”指机器人本人');expect(input).toContain('“你”指回复对象');
+      expect(input).not.toContain('不应进入表达阶段的备注');
+      const draft=JSON.parse(String(messages[1]!.content));
+      expect(draft).toMatchObject({回复对象:'当前群聊',待发送回复:'完成，密码 123456。'});
+      expect(draft).not.toHaveProperty('内容');expect(draft).not.toHaveProperty('备注');
+      expect(String(messages[0]!.content)).toContain('不要把草稿当作新消息回答');
       expect(input).toContain('123456');
       return {content:'做好啦，密码是 123456。'};
     });
@@ -44,7 +47,7 @@ describe('对话 Agent 隔离',()=>{
     const reply=new ReplyRuntime(store,{send},(draft)=>renderConversationReply(store,draft,async(messages)=>{
       const input=JSON.stringify(messages.map((message)=>message.content));
       expect(input).toContain('小喵');expect(input).toContain('member-1');expect(input).not.toContain('member-2');
-      expect(input).toContain('可以结合语境自行决定是否艾特');
+      expect(input).toContain('需要艾特时使用');
       return {content:'@小喵（member-1） 主人叫你啦'};
     }));
     const result=await reply.send('g','group','m','text','请小喵过来');

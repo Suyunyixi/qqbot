@@ -92,12 +92,12 @@ describe('全局用户记忆和创建者权限', () => {
       expect(input).toContain('[已隐藏');expect(output).toContain('[已隐藏密钥]');
     } finally {fetchSpy.mockRestore();store.close();}
   });
-  it('执行 Agent 保留前后台各自独有的工具，同名优先执行环境且不能直接发群消息', () => {
+  it('执行 Agent 合并前台与专用工具，同名使用前台实例且不能直接发群消息', () => {
     const foreground=[{name:'only_foreground'},{name:'shared',version:'前台'},{name:'send_text'}];
-    const background=[{name:'only_background'},{name:'shared',version:'后台'},{name:'send_media'}];
-    const tools=executionAgentTools(foreground,background);
-    expect(tools.map((item)=>item.name)).toEqual(['only_background','shared','only_foreground']);
-    expect(tools.find((item)=>item.name==='shared')).toMatchObject({version:'后台'});
+    const additional=[{name:'video_frames'},{name:'shared',version:'专用'},{name:'send_media'}];
+    const tools=executionAgentTools(foreground,additional);
+    expect(tools.map((item)=>item.name)).toEqual(['only_foreground','shared','video_frames']);
+    expect(tools.find((item)=>item.name==='shared')).toMatchObject({version:'前台'});
   });
   it('沙箱权限不会把关闭的语音工具误报为当前能力', async () => {
     const store=new Store(':memory:');const reply=new ReplyRuntime(store,{send:async()=>({})});const tasks=new TaskManager(store,async()=>'',async()=>{});
@@ -164,11 +164,11 @@ describe('全局用户记忆和创建者权限', () => {
       const discovery=createToolDiscovery(tools,store,{conversationId:'g',scope:'group'},'你好');
       const preview=JSON.parse(String(await discovery.finder.invoke({listAll:true,limit:100}))) as {activated:boolean;tools:Array<{name:string}>};
       expect(preview.activated).toBe(false);expect(preview.tools.some((entry)=>entry.name==='inspect_media')).toBe(false);
-      expect(discovery.enabled.has('search_images')).toBe(false);
+      expect(discovery.enabled.has('search_images')).toBe(true);
       const denied=JSON.parse(String(await discovery.finder.invoke({names:['inspect_media'],limit:12,listAll:false}))) as {missing:string[]};
       expect(denied.missing).toEqual(['inspect_media']);expect(discovery.enabled.has('inspect_media')).toBe(false);
       await discovery.finder.invoke({names:['search_images'],limit:12,listAll:false});expect(discovery.enabled.has('search_images')).toBe(true);
-      const other=createToolDiscovery(tools,store,{conversationId:'g',scope:'group'},'你好');expect(other.enabled.has('search_images')).toBe(false);
+      const other=createToolDiscovery(tools,store,{conversationId:'g',scope:'group'},'你好');expect(other.enabled.has('search_images')).toBe(true);
     } finally {tasks.stop();store.close();}
   });
   it('工具运行期间能看到进行中状态，完成后更新同一条记录', async () => {
@@ -439,6 +439,8 @@ describe('管理页面接口', () => {
       const base=`http://127.0.0.1:${address.port}`;
       const metrics=await (await fetch(base+'/api/metrics')).json() as {turns:Array<{duration_ms:number;tool_calls:number;total_tokens:number|null}>;turnCalls:Array<{label:string;result_characters:number|null}>};
       expect(metrics.turns[0]).toMatchObject({duration_ms:150,tool_calls:2,total_tokens:null});expect(metrics.turnCalls).toEqual(expect.arrayContaining([expect.objectContaining({label:'联网搜索',result_characters:42})]));
+      const flow=await (await fetch(base+'/api/dialogue-flow')).json() as {flows:Array<{id:string;main:unknown[];expressions:unknown[];deliveries:unknown[]}>};
+      expect(flow.flows[0]).toMatchObject({id:'turn',main:[],expressions:[],deliveries:[]});
       const activity=await (await fetch(base+'/api/tool-activity')).json() as {usage:Array<{name:string;calls:number;successes:number;failures:number}>};
       expect(activity.usage[0]).toMatchObject({name:'web_search',calls:2,successes:1,failures:1});
     } finally {await new Promise<void>((resolve)=>server.close(()=>resolve()));store.close();}

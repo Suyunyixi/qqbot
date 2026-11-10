@@ -32,6 +32,7 @@ const { pcmToSilk, loadSilkWasm } = await import('@tencent-connect/qqbot-nodejs/
 const { savedCredentials, QQAdapter } = await import('../src/platform/qq/adapter.js');
 const { makeModel } = await import('../src/models/factory.js');
 const { traceFile } = await import('../src/models/trace.js');
+const { handleAdmin } = await import('../src/admin/api.js');
 const { filesystemRules } = await import('../src/tools/sandbox.js');
 const { liveContext, recheckBeforeReply } = await import('../src/agent/live-context.js');
 import type { DeliveryItem, InboundEvent } from '../src/domain/types.js';
@@ -107,8 +108,8 @@ describe('消息记录与触发', () => {
       const result=JSON.parse(String(await lookup.invoke({query:'苍蓝'})));
       expect(result.result.members).toEqual(expect.arrayContaining([expect.objectContaining({memberId:'member-1',remark:'苍蓝'}),expect.objectContaining({memberId:'member-2',name:'新名字',matchingHistoricalNames:['苍蓝']})]));
       expect(result.result.members).toHaveLength(2);
-      expect(result.result.hint).toContain('<qqbot-at-user');
-      expect(result.result.members).toEqual(expect.arrayContaining([expect.objectContaining({memberId:'member-1',mention:'<qqbot-at-user id="member-1" />'})]));
+      expect(result.result.hint).toContain('对话 Agent');
+      expect(result.result.members[0]).not.toHaveProperty('mention');
     } finally {tasks.stop();store.close();}
   });
   it('QQ 绑定凭据保存在数据库中，重新打开后无需重新扫码', () => {
@@ -497,7 +498,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
         else if (allText.includes('恢复中途测试') && isChild) reply={role:'assistant',content:'任务恢复完成'};
         else if (permissionScenario && last?.role !== 'tool') reply = { role: 'assistant', content: null, tool_calls: [{ id: 'denied-write', type: 'function', function: { name: 'write_file', arguments: JSON.stringify({ file_path: '/denied.txt', content: 'must not be written' }) } }] };
         else if (permissionScenario) reply = { role: 'assistant', content: '权限测试完成' };
-        else if (thinkingScenario && last?.role !== 'tool') reply = { role: 'assistant', content: null, reasoning_content: 'provider-thinking-token', tool_calls: [{ id: 'thinking-call', type: 'function', function: { name: 'send_text', arguments: JSON.stringify({ text: '处理中' }) } }] };
+        else if (thinkingScenario && last?.role !== 'tool') reply = { role: 'assistant', content: null, reasoning_content: 'provider-thinking-token', tool_calls: [{ id: 'thinking-call', type: 'function', function: { name: 'sandbox_capabilities', arguments: '{}' } }] };
         else if (thinkingScenario) {
           const prior = parsed.messages.find((message) => message.role === 'assistant' && message.reasoning_content === 'provider-thinking-token');
           reply = { role: 'assistant', content: prior ? '回放成功' : '回放丢失' };
@@ -506,7 +507,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
         else if (asyncScenario && isChild) reply = { role: 'assistant', content: `任务完成，文件位于 ${fileToSend}` };
         else if (asyncScenario && callback && last?.role !== 'tool') reply = { role: 'assistant', content: null, tool_calls: [{ id: `tool-send-${requests.length}`, type: 'function', function: { name: 'send_media', arguments: JSON.stringify({ file: fileToSend, kind: 'file' }) } }] };
         else if (asyncScenario && callback) reply = { role: 'assistant', content: '后台处理完成，文件已发送。' };
-        else if (asyncScenario && last?.role !== 'tool') reply = { role: 'assistant', content: null, tool_calls: [{ id: `tool-start-${requests.length}`, type: 'function', function: { name: 'start_background_task', arguments: JSON.stringify({ instruction: '后台处理指定测试，并发送生成的文件', acknowledgement:'好呀，我去后台处理～' }) } }] };
+        else if (asyncScenario && last?.role !== 'tool') reply = { role: 'assistant', content: null, tool_calls: [{ id: `tool-start-${requests.length}`, type: 'function', function: { name: 'start_background_task', arguments: JSON.stringify({ instruction: '后台处理指定测试，并发送生成的文件' }) } }] };
         else if (asyncScenario) reply = { role: 'assistant', content: '已开始后台处理。' };
         else reply = fileScenario && last?.role !== 'tool'
           ? { role: 'assistant', content: null, tool_calls: [{ id: 'tool-1', type: 'function', function: { name: 'send_media', arguments: JSON.stringify({ file: fileToSend, kind: 'file' }) } }] }
@@ -532,29 +533,17 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       expect(history).toContain('实际发言');expect(history).not.toContain('执行草稿');
     } finally {harness.stop();store.close();}
   },20000);
-  it('明确的 JM 下载请求进入持久化任务，文件发送后才报告交付',async()=>{
-    const store=new Store(':memory:');const delivered:DeliveryItem[]=[];
-    const harness=new Harness(store,{send:async(item)=>{delivered.push(item);return {id:`jm-${delivered.length}`};}});
-    const original=globalThis.fetch;
-    const worker=vi.spyOn(globalThis,'fetch').mockImplementation((input,init)=>{
-      if(String(input).includes('python-runner:8766')) {
-        const bytes=Buffer.from('%PDF-1.7 模拟文件');
-        return Promise.resolve(new Response(JSON.stringify({exitCode:0,timedOut:false,stdout:'',stderr:'',network:true,files:[{path:'result.pdf',data:bytes.toString('base64'),size:bytes.length}]}),{headers:{'Content-Type':'application/json'}}));
-      }
-      return original(input,init);
-    });
+  it('明确的 JM 请求与普通聊天一样交给主 Agent 理解',async()=>{
+    const store=new Store(':memory:');const harness=new Harness(store,{send:async()=>({id:'sent'})});
+    const respond=vi.spyOn(AgentRuntime.prototype,'respond').mockResolvedValue();
     try {
       await harness.receive(event({id:'jm-silent',conversationId:'jm-group',content:'JM123456',isMention:false}));
-      expect(store.listTasks('jm-group')).toHaveLength(0);
+      expect(respond).not.toHaveBeenCalled();
       await harness.receive(event({id:'jm-request',conversationId:'jm-group',content:'给我去JM上面下载 1475661，然后导出pdf 添加密码发到群里',isMention:true}));
-      await vi.waitFor(()=>expect(store.listTasks('jm-group')[0]?.status).toBe('completed'),{timeout:15000});
-      const task=store.listTasks('jm-group')[0]!;
-      expect(task.kind).toBe('jm_pdf');expect(JSON.parse(task.result!).delivered).toBe(true);
-      expect(delivered.filter((item)=>item.kind==='file')).toHaveLength(1);
-      expect(delivered.find((item)=>item.kind==='file')?.fileName).toBe('JM1475661.pdf');
-      await vi.waitFor(()=>expect(store.task(task.id)?.notified).toBe(1),{timeout:15000});
-      expect(delivered.some((item)=>item.kind==='text' && item.content.includes(JSON.parse(task.result!).password))).toBe(true);
-    } finally {worker.mockRestore();harness.stop();store.close();}
+      await vi.waitFor(()=>expect(respond).toHaveBeenCalledOnce());
+      expect(respond.mock.calls[0]?.[1].content).toContain('1475661');
+      expect(store.listTasks('jm-group')).toHaveLength(0);
+    } finally {respond.mockRestore();harness.stop();store.close();}
   },20000);
   it('可使用 Anthropic 兼容接口并解析工具调用', async () => {
     const oldUrl = process.env.MODEL_BASE_URL;
@@ -570,8 +559,8 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     const delivered: DeliveryItem[] = [];
     const harness = new Harness(store, { send: async (item) => { delivered.push(item); return { id: `qq-${delivered.length}` }; } });
     await harness.receive(event({ id: 'thinking', conversationId: 'group-thinking', content: '思考工具回放', isMention: true }));
-    await vi.waitFor(() => expect(delivered.length).toBe(2), { timeout: 15000 });
-    expect(delivered.map((item) => item.content)).toEqual(['处理中', '回放成功']);
+    await vi.waitFor(() => expect(delivered.length).toBe(1), { timeout: 15000 });
+    expect(delivered.map((item) => item.content)).toEqual(['回放成功']);
     expect(delivered.some((item) => item.content.includes('provider-thinking-token'))).toBe(false);
     harness.stop(); store.close();
   }, 20000);
@@ -602,15 +591,29 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     await vi.waitFor(() => expect(delivered.length).toBe(1), { timeout: 15000 });
     expect(delivered[0]?.content).toContain('NAS');
     const mainRequest=requests.slice(before).find((request)=>!JSON.stringify(request.messages).includes('群聊答复语义复核器'));
+    expect(JSON.stringify(mainRequest?.tools)).not.toContain('"name":"send_text"');
     expect(JSON.stringify(mainRequest?.messages)).toContain('刚买了 NAS');
     expect(JSON.stringify(mainRequest?.messages)).toContain('小王');
     expect(JSON.stringify(mainRequest?.messages)).toContain('小王备注');
     expect(JSON.stringify(mainRequest?.messages)).toContain('负责存储设备');
     expect(JSON.stringify(mainRequest?.messages)).toContain('本轮新增的聊天原文（按时间顺序');
+    const turn=store.db.prepare("SELECT id FROM chat_turns WHERE message_id='trigger'").get() as {id:string};
+    expect(store.db.prepare("SELECT phase FROM model_traces WHERE turn_id=? AND phase='对话表达'").get(turn.id)).toBeDefined();
+    expect(store.db.prepare("SELECT phase FROM execution_metrics WHERE turn_id=? AND phase='对话表达'").get(turn.id)).toBeDefined();
+    expect(store.db.prepare('SELECT status FROM outbox WHERE id LIKE ?').get(`turn:${turn.id}:%`)).toMatchObject({status:'sent'});
+    await vi.waitFor(()=>expect(store.db.prepare("SELECT response_path FROM model_traces WHERE turn_id=? AND phase='对话表达'").get(turn.id)).toMatchObject({response_path:expect.any(String)}));
+    const admin=http.createServer((req,res)=>void handleAdmin(req,res,store,undefined));await new Promise<void>((resolve)=>admin.listen(0,'127.0.0.1',resolve));
+    try {
+      const port=(admin.address() as {port:number}).port;
+      const result=await (await fetch(`http://127.0.0.1:${port}/api/dialogue-flow`)).json() as {flows:Array<{id:string;expressions:Array<{persona_in_request:boolean;text:string}>;deliveries:Array<{status:string}>}>};
+      const flow=result.flows.find((entry)=>entry.id===turn.id);
+      expect(flow?.expressions[0]).toMatchObject({persona_in_request:true,rendered_text:expect.stringContaining('NAS')});
+      expect(flow?.deliveries[0]).toMatchObject({status:'sent'});
+    } finally {await new Promise<void>((resolve)=>admin.close(()=>resolve()));}
     const modelMessages=mainRequest?.messages as Array<{role:string;content:unknown}>;
     const system=JSON.stringify(modelMessages.filter((message)=>message.role==='system'));
     const user=JSON.stringify(modelMessages.filter((message)=>message.role==='user'));
-    expect(system).toContain('理解与执行 Agent');expect(system).toContain('<qqbot-at-user');expect(system).toContain('Markdown');expect(system).toContain('结合语境判断是否需要 @');
+    expect(system).toContain('理解与执行 Agent');expect(system).not.toContain('<qqbot-at-user');expect(system).toContain('Markdown');expect(system).toContain('由对话 Agent 自行决定');
     expect(system).not.toContain('负责存储设备');expect(user).toContain('负责存储设备');
     harness.stop(); store.close();
   }, 20000);
@@ -769,10 +772,10 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
       const calls=requests.slice(before).filter((item)=>JSON.stringify(item.messages).includes('工具按需加载测试'));
       const names=(item:Record<string,unknown>)=>((item.tools ?? []) as Array<{function?:{name?:string}}>).map((entry)=>entry.function?.name);
       expect(calls.length).toBeGreaterThanOrEqual(3);
-      expect(names(calls[0]!)).toContain('find_tools');expect(names(calls[0]!)).not.toContain('inspect_media');
+      expect(names(calls[0]!)).toContain('find_tools');expect(names(calls[0]!)).toContain('inspect_media');
       const executorCalls=calls.filter((item)=>JSON.stringify(item.messages).includes('你是主 Agent 的内部执行助手'));
       expect(executorCalls.some((item)=>names(item).includes('inspect_media'))).toBe(true);
-      expect(calls.filter((item)=>!JSON.stringify(item.messages).includes('你是主 Agent 的内部执行助手')).every((item)=>!names(item).includes('inspect_media'))).toBe(true);
+      expect(calls.filter((item)=>!JSON.stringify(item.messages).includes('你是主 Agent 的内部执行助手')).some((item)=>names(item).includes('inspect_media'))).toBe(true);
       expect(store.db.prepare("SELECT candidates FROM tool_discoveries WHERE conversation_id='dynamic-group' AND kind='search'").get()).toMatchObject({candidates:'["inspect_media"]'});
       expect((store.db.prepare("SELECT COUNT(*) AS n FROM execution_metrics WHERE conversation_id='dynamic-group' AND name='inspect_media'").get() as {n:number}).n).toBe(1);
     } finally {harness.stop();store.close();}
@@ -907,7 +910,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     expect(names).toContain('web_search');expect(names).not.toContain('send_text');expect(names).not.toContain('send_media');expect(names).not.toContain('owner_set_persona');
     const parent=requests.slice(before).filter((request)=>!JSON.stringify(request.messages).includes('你是主 Agent 的内部执行助手'));
     expect(parent.length).toBeGreaterThanOrEqual(2);
-    for(const request of parent){const system=JSON.stringify((request.messages as Array<{role:string;content:unknown}>).filter((message)=>message.role==='system'));expect(system).not.toContain('完整主人格：我是活泼的大肥鱼，遇到工具结果也自然地和群友说话。');expect(system).toContain('结合语境判断是否需要 @');expect(system).toContain('<qqbot-at-user');}
+    for(const request of parent){const system=JSON.stringify((request.messages as Array<{role:string;content:unknown}>).filter((message)=>message.role==='system'));expect(system).not.toContain('完整主人格：我是活泼的大肥鱼，遇到工具结果也自然地和群友说话。');expect(system).toContain('由对话 Agent 自行决定');expect(system).not.toContain('<qqbot-at-user');}
     expect(JSON.stringify(child!.messages)).not.toContain('完整主人格：我是活泼的大肥鱼');
     expect((store.db.prepare("SELECT COUNT(*) AS n FROM execution_metrics WHERE conversation_id='group-internal' AND phase='执行 Agent'").get() as {n:number}).n).toBeGreaterThan(0);
     harness.stop();store.close();
@@ -1050,7 +1053,7 @@ describe('真实 LangChain + Deep Agents 调用链', () => {
     await harness.receive(event({ id: 'task-request', conversationId: 'group-task', content: '请后台处理指定测试并把结果发群里', isMention: true }));
     await vi.waitFor(() => expect(delivered.length).toBe(3), { timeout: 15000 });
     expect(delivered.map((item) => item.kind)).toEqual(['text', 'file', 'text']);
-    expect(delivered[0]?.content).toBe('好呀，我去后台处理～');
+    expect(delivered[0]?.content).toBe('已开始后台处理。');
     expect(store.listTasks('group-task')[0]?.status).toBe('completed');
     expect(store.listTasks('group-task')[0]?.result).toContain(fileToSend);
     harness.stop(); store.close();

@@ -105,6 +105,13 @@ export class MemoryRepository {
       LEFT JOIN messages m ON m.scope=a.scope AND m.conversation_id=a.conversation_id AND m.sender_id=a.external_id AND m.direction='in'
       WHERE a.scope=? AND a.conversation_id=? GROUP BY a.scope,a.conversation_id,a.external_id ORDER BY last_message DESC,a.external_id`).all(this.owner() ?? '',scope,conversationId) as ConversationMember[];
   }
+  /** 表达阶段只读取当前会话的成员名称和标识，不扫描聊天记录。 */
+  listMentionMembers(scope:Scope, conversationId:string):Array<{external_id:string;display_name:string|null;remark_name:string}> {
+    return this.db.prepare(`SELECT a.external_id,a.display_name,COALESCE(p.remark_name,'') AS remark_name
+      FROM identity_aliases a LEFT JOIN conversation_member_profiles p
+      ON p.scope=a.scope AND p.conversation_id=a.conversation_id AND p.external_id=a.external_id
+      WHERE a.scope=? AND a.conversation_id=? ORDER BY a.external_id`).all(scope,conversationId) as Array<{external_id:string;display_name:string|null;remark_name:string}>;
+  }
   saveConversationMember(scope: Scope, conversationId: string, externalId: string, remarkName: string, note: string, create = false): void {
     this.db.transaction(() => {
       if (!this.db.prepare("SELECT 1 FROM messages WHERE scope=? AND conversation_id=? LIMIT 1").get(scope,conversationId)) throw new Error('会话不存在');

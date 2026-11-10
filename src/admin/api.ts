@@ -16,7 +16,13 @@ import { builtInCatalog, describeTool, toolFeature } from '../tools/catalog.js';
 import { quotedMessage } from '../agent/quoted-message.js';
 import { quoteSearchSql } from '../storage/quote-search.js';
 import { createGunzip } from 'node:zlib';
+import { createHash } from 'node:crypto';
 import { traceFile } from '../models/trace.js';
+import { dialogueInput, readTraceText, requestIncludesPersona, responseText } from './dialogue-flow.js';
+import { executionAgentTools } from '../agent/subagent-policy.js';
+import { historyImageTools } from '../agent/history-images.js';
+import { videoFrameTools } from '../agent/video-frames.js';
+import { permitted, toolPermissions } from '../tools/sandbox.js';
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value));
@@ -76,6 +82,22 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
       if(!harness)throw new Error('机器人尚未启动');
       harness.attachments.retry(input.conversationId,input.messageId,input.index);json(res,200,{ok:true});return;
     }
+    if (req.method === 'GET' && url.pathname === '/api/dialogue-flow') {
+      const turns=store.db.prepare(`SELECT t.id,t.conversation_id,t.scope,t.status,t.received_at,t.duration_ms,
+        m.content AS user_message,m.sender_name FROM chat_turns t LEFT JOIN messages m ON m.conversation_id=t.conversation_id AND m.id=t.message_id
+        ORDER BY t.received_at DESC LIMIT 30`).all() as Array<{id:string;conversation_id:string}>;
+      const getTraces=store.db.prepare("SELECT id,phase,status,persona_version,request_path,response_path,rendered_text FROM model_traces WHERE turn_id=? AND phase IN ('主回复','对话表达') ORDER BY started_at");
+      const getDeliveries=store.db.prepare("SELECT kind,status,content,error FROM outbox WHERE conversation_id=? AND id LIKE ? ORDER BY created_at");
+      const currentPersona=persona(store);const currentHash=createHash('sha256').update(currentPersona).digest('hex');
+      const flows=turns.map((turn)=>{
+        const traces=getTraces.all(turn.id) as Array<{id:string;phase:string;status:string;persona_version:string|null;request_path:string|null;response_path:string|null}>;
+        const main=traces.filter((entry)=>entry.phase==='主回复').map((entry)=>({...entry,text:responseText(readTraceText(entry.response_path) ?? '')}));
+        const expressions=traces.filter((entry)=>entry.phase==='对话表达').map((entry)=>{const request=readTraceText(entry.request_path);return {...entry,input:dialogueInput(request ?? ''),model_text:responseText(readTraceText(entry.response_path) ?? ''),persona_matches:entry.persona_version?entry.persona_version===currentHash:null,persona_in_request:request?requestIncludesPersona(request,currentPersona):null};});
+        const deliveries=getDeliveries.all(turn.conversation_id,`turn:${turn.id}:%`);
+        return {...turn,main,expressions,deliveries};
+      });
+      json(res,200,{flows});return;
+    }
     if (req.method === 'GET' && url.pathname === '/api/metrics') {
       const totals=store.db.prepare(`SELECT phase,COUNT(*) AS calls,SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failures,
         SUM(input_tokens) AS input_tokens,SUM(output_tokens) AS output_tokens,SUM(total_tokens) AS total_tokens,
@@ -115,12 +137,29 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
       const config=readConfig();const entries=builtInCatalog().filter((entry)=>!entry.name.startsWith('owner_'));
       const probe=new Store(':memory:');const reply=new ReplyRuntime(probe,{send:async()=>({})});const tasks=new TaskManager(probe,async()=>'',async()=>{});
       let pluginError='';
+      let agents:Array<{name:string;description:string;tools:string[];conditional?:string}> = [];
       try {for(const background of [false,true])for(const item of makeTools({conversationId:'_catalog',scope:'c2c',store:probe,reply,tasks,background,taskId:background?'catalog':undefined})) {
         const entry=describeTool(item,true);const index=entries.findIndex((existing)=>existing.name===entry.name);if(index>=0)entries[index]=entry;else if(entry.source!=='内置')entries.push(entry);
-      }} catch(error){pluginError=error instanceof Error?error.message:String(error);} finally {tasks.stop();probe.close();}
+      }
+        const base={conversationId:'_catalog',scope:'group' as const,store:probe,reply,tasks,background:false,actorId:'_catalog'};
+        const ordinary=makeTools(base).filter((item)=>item.name!=='send_text');
+        const owner=makeTools({...base,owner:true,qqApi:async()=>({})}).filter((item)=>item.name!=='send_text');
+        const background=makeTools({...base,background:true,taskId:'catalog'});
+        const archive=new AttachmentArchive(probe);
+        const history=historyImageTools(probe,archive,'_catalog',config.model.vision).tools;
+        const video=config.tools.media && permitted(toolPermissions.read_video_frames!,config)?videoFrameTools(archive,'_catalog',config.model.vision).tools:[];
+        const ordinaryNames=new Set(ordinary.map((item)=>item.name));
+        const framework=['ls','read_file','write_file','edit_file','delete','glob','grep'];
+        agents=[
+          {name:'主 Agent',description:'理解群聊、记忆与用户意图，直接使用业务工具并决定是否委托。',tools:[...ordinary,...history,...video].map((item)=>item.name).concat('find_tools','task',framework),conditional:`创建者额外工具：${owner.filter((item)=>!ordinaryNames.has(item.name)).map((item)=>describeTool(item).label).join('、') || '无'}；按群开关和身份实际过滤。`},
+          {name:'执行子 Agent',description:'按主 Agent 的委托研究和处理文件，结果返回主 Agent。',tools:executionAgentTools(ordinary,video).map((item)=>item.name).concat('find_tools',framework)},
+          {name:'后台任务 Agent',description:'执行耗时任务，按委托交付文件并向主 Agent 回调结果。',tools:[...background,...video].map((item)=>item.name).concat('find_tools','task',framework)},
+          {name:'对话 Agent',description:'依据完整人格重新表达主 Agent 的原话，自行使用 QQ 艾特和 Markdown 格式。',tools:[],conditional:'不调用业务工具，不读取主 Agent 的完整聊天历史；QQ 交付由发送层完成。'},
+        ];
+      } catch(error){pluginError=error instanceof Error?error.message:String(error);} finally {tasks.stop();probe.close();}
       const catalog=entries.map((entry)=>{const feature=toolFeature[entry.name];const missing=entry.permissions.filter((permission)=>!config.sandbox.permissions[permission]);const localImage=['list_chat_images','read_chat_image'].includes(entry.name);const status=localImage?(entry.name==='read_chat_image' && !config.model.vision?'当前模型未启用图片理解':'可查询当前会话记录，无需额外授权'):feature && !config.tools[feature]?'全局已关闭':missing.length?'缺少沙箱权限':'已启用，实际可用性取决于依赖和平台权限';return {...entry,status,missing};});
       const requirements=Object.fromEntries(catalog.map((entry)=>[entry.name,entry.permissions]));
-      json(res,200,{tools:catalog.filter((entry)=>!['find_tools','list_chat_images','read_chat_image','search_chat_history','read_chat_history','read_chat_message'].includes(entry.name)).map((entry)=>entry.name),requirements,catalog,pluginError});return;
+      json(res,200,{tools:catalog.filter((entry)=>!['find_tools','list_chat_images','read_chat_image','search_chat_history','read_chat_history','read_chat_message'].includes(entry.name)).map((entry)=>entry.name),requirements,catalog,agents,pluginError});return;
     }
     if (req.method === 'GET' && url.pathname === '/api/tool-activity') {
       const discoveries=store.db.prepare('SELECT conversation_id,scope,task_id,query,candidates,created_at,kind FROM tool_discoveries ORDER BY seq DESC LIMIT 100').all();
@@ -206,7 +245,9 @@ export async function handleAdmin(req: IncomingMessage, res: ServerResponse, sto
       const calls=store.db.prepare("SELECT task_id,name,duration_ms,status,created_at FROM execution_metrics WHERE phase='工具' AND task_id IS NOT NULL ORDER BY seq DESC LIMIT 500").all();
       const discoveries=store.db.prepare('SELECT task_id,query,candidates,created_at,kind FROM tool_discoveries WHERE task_id IS NOT NULL ORDER BY seq DESC LIMIT 300').all();
       const deliveries=store.db.prepare("SELECT t.id AS task_id,o.kind,o.file_name,o.status,o.error,o.created_at FROM tasks t JOIN outbox o ON o.id LIKE 'task:' || t.id || ':%' ORDER BY o.created_at DESC LIMIT 500").all();
-      json(res, 200, { tasks, progress, calls, discoveries, deliveries }); return;
+      const currentPersona=persona(store);const hash=createHash('sha256').update(currentPersona).digest('hex');
+      const expressions=(store.db.prepare("SELECT id,task_id,status,persona_version,request_path,response_path,rendered_text,started_at FROM model_traces WHERE task_id IS NOT NULL AND phase='对话表达' ORDER BY started_at DESC LIMIT 300").all() as Array<{persona_version:string|null;request_path:string|null;response_path:string|null}>).map((entry)=>{const request=readTraceText(entry.request_path);return {...entry,input:dialogueInput(request ?? ''),model_text:responseText(readTraceText(entry.response_path) ?? ''),persona_matches:entry.persona_version?entry.persona_version===hash:null,persona_in_request:request?requestIncludesPersona(request,currentPersona):null};});
+      json(res, 200, { tasks, progress, calls, discoveries, deliveries, expressions }); return;
     }
     if (req.method === 'POST' && url.pathname === '/api/tasks/action') {
       if (!harness) throw new Error('机器人运行时尚未启动');

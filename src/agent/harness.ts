@@ -11,7 +11,7 @@ import { BalanceAlert, balanceAlertText, isBalanceError } from './balance-alert.
 import { AttachmentArchive } from '../storage/attachments.js';
 import { quotedAttachmentArchiveId, quotedMessageAttachments } from './quoted-message.js';
 import { renderConversationReply } from './conversation-renderer.js';
-import { parseJmRequest, runJmTask } from '../tools/jm.js';
+import { runJmTask } from '../tools/jm.js';
 
 export function replyForChatError(error: unknown): string {
   const status=typeof error==='object' && error!==null && 'status' in error ? Number(error.status) : undefined;
@@ -56,16 +56,6 @@ export class Harness {
     // 在 Agent 图之前快速过滤，确保普通群消息只记录、不调用模型。
     if (isCommunityScope(event.scope) && !groupSettings(this.store, event.conversationId).enabled) return false;
     if (!shouldRespond(event, effectiveTrigger(this.store, event.scope, event.conversationId))) return false;
-    const jm=parseJmRequest(event.content);
-    if (jm) {
-      if (isCommunityScope(event.scope) && groupSettings(this.store,event.conversationId).disabledTools.some((name)=>['download_jm_pdf','run_python_script'].includes(name))) {
-        void this.reply.send(event.conversationId,event.scope,event.id,'text','本群已停用下载工具，这次没有开始下载。').catch((error:unknown)=>console.error('停用提示失败：',error));
-        return true;
-      }
-      const taskId=this.tasks.enqueue(event.conversationId,event.scope,event.id,`下载 JM${jm.albumId} 并发送加密 PDF`,event.senderId,'jm_pdf',JSON.stringify(jm));
-      void this.schedule(event.conversationId,()=>this.agent.respond({conversationId:event.conversationId,scope:event.scope,replyTo:event.id,store:this.store,reply:this.reply,tasks:this.tasks,background:false}, {...event,senderId:'system',senderName:'后台任务',content:`已创建后台任务 ${taskId}，正在下载 JM${jm.albumId} 并制作加密 PDF；尚未完成。请简短告知用户。`},true)).catch((error:unknown)=>console.error('任务启动通知失败：',error instanceof Error?error.message:String(error)));
-      return true;
-    }
     const owner = this.store.memory.isOwner(event.scope, event.conversationId, event.senderId);
     const turnId=randomUUID();const received=Date.now();
     try {this.store.db.prepare("INSERT INTO chat_turns(id,conversation_id,scope,message_id,status,received_at) VALUES(?,?,?,?,'queued',?)").run(turnId,event.conversationId,event.scope,event.id,new Date(received).toISOString());}
@@ -85,7 +75,7 @@ export class Harness {
       if (!ownerBalance) void this.balanceAlert.report(err);
       const response=ownerBalance ? `${isCommunityScope(event.scope) ? `<qqbot-at-user id="${event.senderId}" /> ` : ''}${balanceAlertText}` : replyForChatError(err);
       try {
-        await this.reply.send(event.conversationId, event.scope, event.id, 'text', response,undefined,undefined,true);
+        await this.reply.sendSystemText(event.conversationId,event.scope,event.id,response);
         if (ownerBalance) this.balanceAlert.notified();
       } catch (sendError) {
         if (ownerBalance) void this.balanceAlert.report(err);
@@ -99,16 +89,8 @@ export class Harness {
     const instruction = task.status === 'waiting' ? '任务正在等待答复，尚未完成。' : task.status === 'progress' ? '这是任务进度，尚未完成。' : '根据原请求和实际结果处理；需要交付的文件确认发送后再说已发送，已交付的内容不要重复发送。';
     const event: InboundEvent = { id: task.reply_to ?? '', conversationId: task.conversation_id, scope: task.scope, senderId: 'system', senderName: '后台任务', timestamp: new Date().toISOString(), isMention: false, attachments: [], content: `后台任务通知（这是系统事件，不是群友发言）。任务ID：${task.id}；原任务：${task.instruction}；状态：${task.status}；结果或问题：${task.result ?? ''}；错误：${task.error ?? ''}。${instruction}` };
     const notificationKey = `${task.status}:${createHash('sha256').update(task.result ?? task.error ?? '').digest('hex').slice(0, 16)}`;
-    try {await this.schedule(task.conversation_id, async () => {await this.agent.respond({ conversationId: task.conversation_id, scope: task.scope, replyTo: task.reply_to ?? undefined, store: this.store, reply: this.reply, tasks: this.tasks, background: false, taskId: task.id, notificationKey }, event, true);await this.ensureJmPassword(task);this.agent.compactFinishedConversation(task.scope,task.conversation_id);});}
+    try {await this.schedule(task.conversation_id, async () => {await this.agent.respond({ conversationId: task.conversation_id, scope: task.scope, replyTo: task.reply_to ?? undefined, store: this.store, reply: this.reply, tasks: this.tasks, background: false, taskId: task.id, notificationKey }, event, true);this.agent.compactFinishedConversation(task.scope,task.conversation_id);});}
     catch(error) {void this.balanceAlert.report(error);throw error;}
-  }
-  private async ensureJmPassword(task:TaskRow):Promise<void> {
-    if(task.kind!=='jm_pdf' || task.status!=='completed' || !task.result)return;
-    let result:{delivered?:unknown;password?:unknown};
-    try {result=JSON.parse(task.result) as typeof result;} catch {return;}
-    if(result.delivered!==true || typeof result.password!=='string' || !result.password)return;
-    const sent=this.store.db.prepare("SELECT 1 FROM outbox WHERE conversation_id=? AND id LIKE ? AND kind='text' AND status='sent' AND instr(content,?)>0 LIMIT 1").get(task.conversation_id,`task:${task.id}:%`,result.password);
-    if(!sent) await this.reply.send(task.conversation_id,task.scope,task.reply_to ?? undefined,'text',`PDF 打开密码：${result.password}`,undefined,`task:${task.id}:password`,false,{remarks:'文件已经发送；必须原样告知打开密码。',protectedValues:[result.password]});
   }
   private schedule(key: string, work: () => Promise<void>): Promise<void> {
     const previous = this.queues.get(key) ?? Promise.resolve();

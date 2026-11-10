@@ -19,10 +19,15 @@ export function splitText(text: string, limit: number): string[] {
   return chunks;
 }
 
-// Every delivery, including explicit tools and background callbacks, uses this queue.
+// 所有交付共用同一会话队列，保持顺序和发送记录一致。
 export class ReplyRuntime {
   private readonly queues = new Map<string, Promise<unknown>>();
-  constructor(private readonly store: Store, private readonly sender: Sender, private readonly render?: (draft:{conversationId:string;scope:Scope;content:string;recipient?:string;remarks?:string;protectedValues?:string[]})=>Promise<string>) {}
+  constructor(private readonly store: Store, private readonly sender: Sender, private readonly render?: (draft:{conversationId:string;scope:Scope;content:string;recipient?:string;remarks?:string;protectedValues?:string[];turnId?:string;taskId?:string})=>Promise<string>) {}
+
+  /** 确定性系统通知的明确入口，不依赖模型；同样经过交付队列和记录。 */
+  sendSystemText(conversationId:string,scope:Scope,replyTo:string|undefined,content:string,deliveryKey?:string):Promise<string> {
+    return this.send(conversationId,scope,replyTo,'text',content,undefined,deliveryKey,true);
+  }
 
   async retry(conversationId: string, id: string, currentReplyTo?: string): Promise<void> {
     const item = this.store.pendingOutbox(conversationId).find((candidate) => candidate.id === id);
@@ -35,7 +40,7 @@ export class ReplyRuntime {
     } catch (error) { this.store.setOutbox(id, 'failed', undefined, error instanceof Error ? error.message : String(error)); throw error; }
   }
 
-  async send(conversationId: string, scope: Scope, replyTo: string | undefined, kind: DeliveryKind, content: string, fileName?: string, deliveryKey?: string, systemMessage=false, draft?:{recipient?:string;remarks?:string;protectedValues?:string[]}): Promise<string> {
+  async send(conversationId: string, scope: Scope, replyTo: string | undefined, kind: DeliveryKind, content: string, fileName?: string, deliveryKey?: string, systemMessage=false, draft?:{recipient?:string;remarks?:string;protectedValues?:string[];turnId?:string;taskId?:string}): Promise<string> {
     if (kind !== 'text' && kind !== 'card' && kind !== 'keyboard' && kind !== 'embed') {
       content = resolveWorkspaceFile(conversationId, content);
     }

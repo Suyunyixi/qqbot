@@ -10,7 +10,7 @@ import { dataDir } from '../config/settings.js';
 import type { Store } from '../storage/store.js';
 import type { Scope } from '../domain/types.js';
 
-type Context={store:Store;conversationId:string;scope:Scope;turnId?:string;taskId?:string;phase:string;personaVersion?:string};
+type Context={store:Store;conversationId:string;scope:Scope;turnId?:string;taskId?:string;phase:string;personaVersion?:string;onTraceId?:(id:string)=>void};
 const traceContext=new AsyncLocalStorage<Context>();
 const compress=promisify(gzip);
 const traceRoot=path.join(dataDir,'traces');
@@ -63,6 +63,7 @@ export async function tracedModelFetch(input:RequestInfo|URL,init?:RequestInit):
   const id=randomUUID();const db=context.store.db;const started=new Date().toISOString();
   try {db.prepare("INSERT INTO model_traces(id,conversation_id,scope,turn_id,task_id,phase,started_at,status,persona_version) VALUES(?,?,?,?,?,?,?,'running',?)").run(id,context.conversationId,context.scope,context.turnId ?? null,context.taskId ?? null,context.phase,started,context.personaVersion ?? null);}
   catch(error){console.error('模型调用记录创建失败：',error instanceof Error?error.message:String(error));return globalThis.fetch(input,init);}
+  context.onTraceId?.(id);
   const secrets=requestSecrets(init);
   let inputBody=typeof init?.body==='string'?init.body:undefined;
   if(inputBody)try{inputBody=redactJson(JSON.parse(inputBody));}catch{/* 非 JSON 请求原样记录，但仍会隐藏当前认证密钥。 */}

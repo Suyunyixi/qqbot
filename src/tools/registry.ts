@@ -87,8 +87,8 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
       const oldNames=ctx.store.db.prepare("SELECT sender_id,sender_name,MAX(seq) AS last_seq FROM messages WHERE scope=? AND conversation_id=? AND direction='in' AND sender_name IS NOT NULL AND instr(lower(sender_name),?)>0 GROUP BY sender_id,sender_name ORDER BY last_seq DESC LIMIT 100").all(ctx.scope,ctx.conversationId,term) as Array<{sender_id:string;sender_name:string}>;
       const matches=ctx.store.memory.listConversationMembers(ctx.scope,ctx.conversationId)
         .filter((member)=>[member.external_id,member.display_name,member.remark_name].some((value)=>value?.toLocaleLowerCase().includes(term)) || oldNames.some((item)=>item.sender_id===member.external_id))
-        .slice(0,30).map((member)=>({memberId:member.external_id,name:member.display_name,remark:member.remark_name,matchingHistoricalNames:oldNames.filter((item)=>item.sender_id===member.external_id).map((item)=>item.sender_name),mention:/^[A-Za-z0-9_-]{1,200}$/.test(member.external_id)?`<qqbot-at-user id="${member.external_id}" />`:undefined}));
-      return {members:matches,hint:'结合对话判断身份；需要 @ 时将确认的 memberId 填入 <qqbot-at-user id="成员标识" />，不要把昵称当作标识。'};
+        .slice(0,30).map((member)=>({memberId:member.external_id,name:member.display_name,remark:member.remark_name,matchingHistoricalNames:oldNames.filter((item)=>item.sender_id===member.external_id).map((item)=>item.sender_name)}));
+      return {members:matches,hint:'结合对话核对成员身份；表达方式由对话 Agent 决定。'};
     }),{name:'find_chat_member',description:'按当前名称、历史发言名称、人工备注或成员标识查找当前群聊或频道已记录的成员；身份不清时结合聊天原文核对，不要猜测。',schema:z.object({query:z.string().trim().min(1).max(200)})}),
     tool(wrap(async ({ query, queries, range }: { query?: string; queries?: string[]; range: 'any'|'day'|'week'|'month'|'year' }) => searchWeb([...(query?[query]:[]),...(queries??[])],{range,observe:observeSearch})), { name: 'web_search', description: '真实联网搜索，支持多个关键词和时间范围，返回来源链接、发布时间、查询时间及 provider 状态；先思考检索方向，再查证原文；空结果不代表事实。', schema: z.object({ query: z.string().min(1).max(500).optional(), queries: z.array(z.string().min(1).max(500)).max(4).optional(), range: z.enum(['any','day','week','month','year']).default('any') }) }),
     tool(wrap(async ({title}:{title:string})=>searchBilibiliCard(title,ctx.signal)),{name:'search_bilibili_card',description:'当 QQ 分享的 B 站小程序卡片只有标题和封面、没有视频地址时，用卡片完整标题检索同名视频，返回 BV 地址、作者和封面候选。标题相同不能自动证明是同一条，应结合来源核实。',schema:z.object({title:z.string().trim().min(1).max(500)})}),
@@ -203,10 +203,10 @@ export function makeTools(ctx: ToolContext, pluginList:readonly ToolPlugin[]=reg
       if (index >= 0) tools.splice(index, 1);
     }
     tools.push(
-      tool(wrap(async ({ instruction, acknowledgement }: { instruction: string; acknowledgement?: string }) => {
+      tool(wrap(async ({ instruction }: { instruction: string }) => {
         const id = ctx.tasks.enqueue(ctx.conversationId, ctx.scope, ctx.replyTo, instruction,ctx.actorId);
-        return { taskId: id, status: 'queued', acknowledgement: acknowledgement?.trim() || undefined, message: '任务已在后台开始；完成或失败后会回到当前会话。' };
-      }), { name: 'start_background_task', description: '启动独立子 Agent 执行耗时任务，随后结束当前回合；完成、进度或问题会自动回调。将用户要求、链接及交付格式完整写进 instruction；acknowledgement 写一句符合主人格、自然简短的即时回复。', returnDirect: true, schema: z.object({ instruction: z.string().min(1).max(5000), acknowledgement: z.string().max(300).optional() }) }),
+        return { taskId: id, status: 'queued', message: '任务已在后台开始；完成或失败后会回到当前会话。' };
+      }), { name: 'start_background_task', description: '启动独立子 Agent 执行耗时任务；完成、进度或问题会自动回调。将用户要求、链接及交付格式完整写进 instruction，然后根据实际启动结果正常回复。', schema: z.object({ instruction: z.string().min(1).max(5000) }) }),
       tool(wrap(async ({ taskId }: { taskId: string }) => {
         const task = ctx.store.task(taskId); if (!task || task.conversation_id !== ctx.conversationId) throw new Error('找不到当前会话的任务');
         return { taskId, status: task.status, result: task.result, error: task.error };

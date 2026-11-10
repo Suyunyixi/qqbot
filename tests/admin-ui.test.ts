@@ -55,7 +55,8 @@ describe('管理页面群聊交互', () => {
       else if(input==='/api/tasks')data={tasks:[]};
       else if(input==='/api/deliveries')data={deliveries:[]};
       else if(input==='/api/metrics')data={totals:[],recent:[]};
-      else if(input==='/api/tools')data={tools:['web_search'],requirements:{web_search:['network']},catalog:[{name:'web_search',label:'联网搜索',category:'联网与资料',description:'搜索网页',permissions:['network'],source:'内置',execution:'前台或后台',effect:'只读或计算',status:'已启用'}]};
+      else if(input==='/api/dialogue-flow')data={flows:[{id:'turn-1',conversation_id:'first',status:'completed',received_at:'2026-11-05T01:00:00Z',sender_name:'群友',user_message:'你好',main:[{id:'trace-1',phase:'主回复',text:'准备回应',request_path:'r',response_path:'s'}],expressions:[{id:'trace-2',input:{content:'准备回应'},text:'你好呀',persona_matches:true,persona_in_request:true,request_path:'r',response_path:'s'}],deliveries:[{kind:'text',status:'sent',content:'你好呀'}]}]};
+      else if(input==='/api/tools')data={tools:['web_search'],requirements:{web_search:['network']},agents:[{name:'主 Agent',description:'理解和调度',tools:['web_search']},{name:'对话 Agent',description:'人格表达',tools:[]}],catalog:[{name:'web_search',label:'联网搜索',category:'联网与资料',description:'搜索网页',permissions:['network'],source:'内置',execution:'前台或后台',effect:'只读或计算',status:'已启用'}]};
       else if(input==='/api/tool-activity')data={discoveries:[{conversation_id:'first',query:'查资料',candidates:'["web_search"]'}],calls:[{conversation_id:'first',name:'web_search',status:'success',duration_ms:12}]};
       else if(input==='/api/runtime-config' && options?.method==='PUT'){savedRuntime=JSON.parse(options.body!) as Record<string,unknown>;data={ok:true};}
       else if(input==='/api/runtime-config')data={model:{provider:'anthropic',baseUrl:'https://example.com',name:'model',vision:true,semanticReview:true,contextTokens:1048576},memory:{recentMessages:60,summaryBudgetChars:8000,summaryThresholdPercent:75},tasks:{concurrency:3},tools:{search:true,media:true,python:true},permissions:{network:true}};
@@ -68,6 +69,10 @@ describe('管理页面群聊交互', () => {
     const context=vm.createContext({document:{querySelector:element,querySelectorAll:()=>[]},fetch,URLSearchParams,console,setInterval:()=>0,setTimeout:()=>0,clearTimeout:()=>{}});
     vm.runInContext(fs.readFileSync('assets/admin/admin.js','utf8'),context);
     await vi.waitFor(()=>expect(view.innerHTML).toContain('启动自检'));
+    await vm.runInContext("page('dialogueFlow')",context);
+    expect(view.innerHTML).toContain('主 Agent');expect(view.innerHTML).toContain('对话 Agent');expect(view.innerHTML).toContain('实际请求包含当前完整人格');expect(view.innerHTML).toContain('你好呀');expect(view.innerHTML).toContain('实际发送');
+    vm.runInContext("state.identities=[{conversation_id:'first',external_id:'opaque-id',display_name:'小王',user_id:'user-1'}]",context);
+    expect(vm.runInContext("displayMentions('<@opaque-id> <@unknown-id>','first')",context)).toBe('@小王 @群成员');
     await vm.runInContext("page('groups')",context);
     expect(view.innerHTML).toContain('联网搜索');expect(view.innerHTML).toContain('优先关注的时间范围');
     expect(view.innerHTML).toContain('未命名QQ群 1');expect(view.innerHTML).toContain('未命名QQ群 2');
@@ -91,6 +96,7 @@ describe('管理页面群聊交互', () => {
     expect(savedRuntime).toMatchObject({model:{contextTokens:1048576},memory:{recentMessages:60,summaryBudgetChars:8000,summaryThresholdPercent:75},tasks:{concurrency:3}});
     await vm.runInContext("page('tools')",context);
     expect(view.innerHTML).toContain('工具目录');expect(view.innerHTML).toContain('联网搜索');expect(view.innerHTML).toContain('查资料');expect(view.innerHTML).toContain('12 毫秒');
+    expect(view.innerHTML).toContain('各 Agent 的职责与工具');expect(view.innerHTML).toContain('对话 Agent');expect(view.innerHTML).toContain('无业务工具');
   });
   it('区分群聊和私聊，能编辑会话备注并添加成员备注', async () => {
     const view=new View();const elements=new Map<string,Element>([['#view',view]]);

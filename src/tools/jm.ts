@@ -5,15 +5,6 @@ import type { TaskRow } from '../storage/store.js';
 import type { ReplyRuntime } from '../delivery/reply.js';
 import { runBundledPython } from './python.js';
 
-export function parseJmRequest(text: string): {albumId:string;password?:string} | undefined {
-  const match = /(?:\bjm|禁漫)[^\d\n]{0,20}(\d{3,12})(?!\d)/i.exec(text);
-  if (!match) return undefined;
-  const compact=text.replace(/<@[^>]+>|<qqbot-at-user[^>]*\/>/g,'').trim();
-  if (!/(下载|下(?:载|来)|打包|导出|做成|转换|发(?:送|群|我)|pdf|\/jm)/i.test(text) && !/^(?:jm|禁漫)\s*\d{3,12}$/i.test(compact)) return undefined;
-  const password = /(?:打开)?密码\s*(?:是|为|设为|设置为|[:：=])\s*([^\s，。！？；,;]{1,100})/.exec(text)?.[1];
-  return {albumId:match[1]!, ...(password ? {password} : {})};
-}
-
 export async function runJmTask(task:TaskRow, reply:ReplyRuntime, signal:AbortSignal):Promise<string> {
   const config=readConfig();
   if (!config.tools.python || !config.sandbox.permissions.process || !config.sandbox.permissions.workspaceWrite || !config.sandbox.permissions.workspaceRead)

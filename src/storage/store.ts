@@ -133,6 +133,7 @@ export class Store {
     const traceColumns=this.db.prepare('PRAGMA table_info(model_traces)').all() as Array<{name:string}>;
     if(!traceColumns.some((column)=>column.name==='persona_version'))this.db.exec('ALTER TABLE model_traces ADD COLUMN persona_version TEXT');
     if(!traceColumns.some((column)=>column.name==='tool_name'))this.db.exec('ALTER TABLE model_traces ADD COLUMN tool_name TEXT');
+    if(!traceColumns.some((column)=>column.name==='rendered_text'))this.db.exec('ALTER TABLE model_traces ADD COLUMN rendered_text TEXT');
     this.memory = new MemoryRepository(this.db);
     this.memory.bootstrapOwner(this.qqCredentials()?.userOpenid);
   }
